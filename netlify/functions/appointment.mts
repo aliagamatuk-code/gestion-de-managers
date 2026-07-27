@@ -22,15 +22,50 @@ function newId() {
   return "c" + Date.now() + Math.floor(Math.random() * 1000);
 }
 
+const LAUNCHER_API = "https://calendarios-managers-quantica360.netlify.app/api/managers";
+
+// Saca el calendarId final de un link de booking, ej:
+// https://api.leadconnectorhq.com/widget/booking/54Gonho9iMIzHsEoZCYF -> 54Gonho9iMIzHsEoZCYF
+function calendarIdFromUrl(u: string): string {
+  if (!u) return "";
+  const parts = u.split("/").filter(Boolean);
+  return parts[parts.length - 1] || "";
+}
+
+async function managerFromCalendarId(calendarId: string): Promise<string> {
+  if (!calendarId) return "";
+  try {
+    const r = await fetch(LAUNCHER_API);
+    if (!r.ok) return "";
+    const list = (await r.json()) as { name: string; url: string }[];
+    const match = list.find((m) => calendarIdFromUrl(m.url) === calendarId);
+    return match ? match.name : "";
+  } catch {
+    return "";
+  }
+}
+
 export default async (req: Request, context: Context) => {
   if (req.method !== "POST") {
     return json({ error: "method_not_allowed" }, 405);
   }
 
+  const url = new URL(req.url);
   const expected = Netlify.env.get("APPOINTMENT_WEBHOOK_SECRET") || "";
-  const provided = req.headers.get("x-webhook-token") || "";
+  const providedQuery = url.searchParams.get("token") || "";
+  const providedHeader = req.headers.get("x-webhook-token") || "";
+  const provided = providedQuery || providedHeader;
   if (!expected || provided !== expected) {
-    return json({ error: "unauthorized" }, 401);
+    return json(
+      {
+        error: "unauthorized",
+        debug: {
+          queryReceived: providedQuery.length > 0,
+          headerReceived: providedHeader.length > 0,
+        },
+      },
+      401
+    );
   }
 
   let body: any;
@@ -40,7 +75,9 @@ export default async (req: Request, context: Context) => {
     return json({ error: "invalid_json" }, 400);
   }
 
-  const manager = (body.manager || "").toString().trim();
+  const calendarId = calendarIdFromUrl((body.calendarId || "").toString().trim());
+  const managerDirecto = (body.manager || "").toString().trim();
+  const manager = managerDirecto || (await managerFromCalendarId(calendarId));
   const nombre = (body.nombre || "").toString().trim();
   const telefono = (body.telefono || "").toString().trim();
   const direccion = (body.direccion || "").toString().trim();
@@ -49,7 +86,14 @@ export default async (req: Request, context: Context) => {
   const notas = (body.notas || "").toString().trim();
 
   if (!manager || !nombre) {
-    return json({ error: "missing_fields", message: "Se requiere al menos manager y nombre" }, 400);
+    return json(
+      {
+        error: "missing_fields",
+        message:
+          "Falta el nombre, o el calendarId no está registrado todavía en la app de calendarios (calendarios-managers-quantica360). Agrega ahí al manager con su link y vuelve a intentar.",
+      },
+      400
+    );
   }
 
   const s = store();
