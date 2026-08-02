@@ -1,31 +1,17 @@
 import type { Context, Config } from "@netlify/functions";
-import { getStore } from "@netlify/blobs";
-
-function store() {
-  return getStore("gestion-managers");
-}
+import {
+getAllClients,
+saveClient,
+addManagerIfMissing,
+findDuplicate,
+newId,
+} from "./_store-helpers.mts";
 
 function json(body: any, status = 200) {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { "content-type": "application/json" },
-  });
-}
-
-function normName(n: any) {
-  return (n || "")
-    .toString()
-    .trim()
-    .toLowerCase()
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/\s+/g, " ");
-}
-function normPhone(p: any) {
-  return (p || "").toString().replace(/\D/g, "").slice(-10);
-}
-function newId() {
-  return "c" + Date.now() + Math.floor(Math.random() * 1000);
+return new Response(JSON.stringify(body), {
+status,
+headers: { "content-type": "application/json" },
+});
 }
 
 const LAUNCHER_API = "https://calendarios-managers-quantica360.netlify.app/api/managers";
@@ -33,120 +19,128 @@ const LAUNCHER_API = "https://calendarios-managers-quantica360.netlify.app/api/m
 // Saca el calendarId final de un link de booking, ej:
 // https://api.leadconnectorhq.com/widget/booking/54Gonho9iMIzHsEoZCYF -> 54Gonho9iMIzHsEoZCYF
 function calendarIdFromUrl(u: string): string {
-  if (!u) return "";
-  const parts = u.split("/").filter(Boolean);
-  return parts[parts.length - 1] || "";
+if (!u) return "";
+const parts = u.split("/").filter(Boolean);
+return parts[parts.length - 1] || "";
 }
 
 async function managerFromCalendarId(calendarId: string): Promise<string> {
-  if (!calendarId) return "";
-  try {
-    const r = await fetch(LAUNCHER_API);
-    if (!r.ok) return "";
-    const list = (await r.json()) as { name: string; url: string }[];
-    const match = list.find((m) => calendarIdFromUrl(m.url) === calendarId);
-    return match ? match.name : "";
-  } catch {
-    return "";
-  }
+if (!calendarId) return "";
+try {
+const r = await fetch(LAUNCHER_API);
+if (!r.ok) return "";
+const list = (await r.json()) as { name: string; url: string }[];
+const match = list.find((m) => calendarIdFromUrl(m.url) === calendarId);
+return match ? match.name : "";
+} catch {
+return "";
+}
 }
 
 export default async (req: Request, context: Context) => {
-  if (req.method !== "POST") {
-    return json({ error: "method_not_allowed" }, 405);
-  }
+if (req.method !== "POST") {
+return json({ error: "method_not_allowed" }, 405);
+}
 
-  const url = new URL(req.url);
-  const expected = "Q360-Citas-8f2k91";
-  const providedQuery = url.searchParams.get("token") || "";
-  const providedHeader = req.headers.get("x-webhook-token") || "";
-  const provided = providedQuery || providedHeader;
-  if (provided !== expected) {
-    return json({ error: "unauthorized" }, 401);
-  }
+const url = new URL(req.url);
+const expected = "Q360-Citas-8f2k91";
+const providedQuery = url.searchParams.get("token") || "";
+const providedHeader = req.headers.get("x-webhook-token") || "";
+const provided = providedQuery || providedHeader;
+if (provided !== expected) {
+return json({ error: "unauthorized" }, 401);
+}
 
-  let body: any;
-  try {
-    body = await req.json();
-  } catch {
-    return json({ error: "invalid_json" }, 400);
-  }
+let body: any;
+try {
+body = await req.json();
+} catch {
+return json({ error: "invalid_json" }, 400);
+}
 
-  const customData = body.customData || {};
-  const calendarIdRaw =
-    (body.calendar && body.calendar.id) || customData.calendarId || "";
-  const calendarId = calendarIdFromUrl(calendarIdRaw.toString().trim());
-  const managerDirecto = (customData.manager || "").toString().trim();
-  const manager = managerDirecto || (await managerFromCalendarId(calendarId));
-  const nombre = (customData.nombre || body.full_name || "").toString().trim();
-  const telefono = (customData.telefono || body.phone || "").toString().trim();
-  const direccion = (customData.direccion || body.full_address || "").toString().trim();
-  const fechaCita = (
-    customData.fechaCita ||
-    (body.calendar && body.calendar.startTime) ||
-    ""
-  ).toString().trim();
-  const idioma = (customData.idioma || "").toString().trim();
-  const notas = (customData.notas || "").toString().trim();
+const customData = body.customData || {};
+const calendarIdRaw =
+(body.calendar && body.calendar.id) || customData.calendarId || "";
+const calendarId = calendarIdFromUrl(calendarIdRaw.toString().trim());
+const managerDirecto = (customData.manager || "").toString().trim();
+const manager = managerDirecto || (await managerFromCalendarId(calendarId));
+const nombre = (customData.nombre || body.full_name || "").toString().trim();
+const telefono = (customData.telefono || body.phone || "").toString().trim();
+const direccion = (customData.direccion || body.full_address || "").toString().trim();
+const fechaCita = (
+customData.fechaCita ||
+(body.calendar && body.calendar.startTime) ||
+""
+).toString().trim();
+const idioma = (customData.idioma || "").toString().trim();
+const notas = (customData.notas || "").toString().trim();
 
-  if (!manager || !nombre) {
-    return json(
-      {
-        error: "missing_fields",
-        debug: {
-          nombreRecibido: nombre || "(vacío)",
-          calendarIdRecibidoCrudo: (body.calendarId || "(vacío)").toString(),
-          calendarIdExtraido: calendarId || "(vacío)",
-          managerEncontrado: manager || "(no encontrado)",
-          cuerpoCompletoRecibido: JSON.stringify(body),
-        },
-      },
-      400
-    );
-  }
+if (!manager || !nombre) {
+return json(
+{
+error: "missing_fields",
+debug: {
+nombreRecibido: nombre || "(vacio)",
+calendarIdRecibidoCrudo: calendarIdRaw || "(vacio)",
+calendarIdExtraido: calendarId || "(vacio)",
+managerEncontrado: manager || "(no encontrado)",
+cuerpoCompletoRecibido: JSON.stringify(body),
+},
+},
+400
+);
+}
 
-  const s = store();
-  const state = (await s.get("state", { type: "json" })) || { managers: [], clients: [] };
-  if (!Array.isArray(state.managers)) state.managers = [];
-  if (!Array.isArray(state.clients)) state.clients = [];
+// AVISO DE SEGURIDAD (blindaje): si idioma o fechaCita llegan vacios,
+// lo anotamos en los registros de la funcion (Netlify > Logs) para
+// detectar rapido si algo cambio en GHL (el trigger, el mapeo de
+// customData, etc.) y esto se rompio de nuevo.
+if (!idioma || !fechaCita) {
+console.warn(
+"AVISO: llego una reserva con datos incompletos.",
+JSON.stringify({
+nombre,
+idioma_vacio: !idioma,
+fechaCita_vacia: !fechaCita,
+})
+);
+}
 
-  // Encontrar el manager existente ignorando mayúsculas/espacios; si no existe, se agrega.
-  let managerMatch = state.managers.find((m: string) => normName(m) === normName(manager));
-  if (!managerMatch) {
-    managerMatch = manager;
-    state.managers.push(manager);
-  }
+// Nos aseguramos de que el manager quede registrado (si ya existe, no
+// hace nada). Esto es de muy bajo riesgo porque casi nunca escribe:
+// solo escribe cuando aparece un manager que todavia no esta en la lista.
+await addManagerIfMissing(manager);
 
-  // Misma regla de duplicados que usa la app: nombre normalizado + últimos 10 dígitos del teléfono.
-  const nn = normName(nombre);
-  const np = normPhone(telefono);
-  const dupe = state.clients.find(
-    (c: any) => normName(c.nombre) === nn && np && normPhone(c.telefono) === np
-  );
+// Revisamos si ya existe un cliente igual (mismo nombre + telefono).
+// Esto es solo LECTURA, asi que nunca puede chocar con otro guardado.
+const existingClients = await getAllClients();
+const dupe = findDuplicate(existingClients, nombre, telefono, null);
+if (dupe) {
+return json({ ok: true, created: false, duplicate: true, clientId: dupe.id });
+}
 
-  if (dupe) {
-    return json({ ok: true, created: false, duplicate: true, clientId: dupe.id });
-  }
+const client = {
+id: newId(),
+manager,
+nombre,
+telefono,
+direccion,
+fechaCita,
+idioma,
+notas,
+estado: "Activo",
+fechaPago: "",
+revisar: false,
+};
 
-  const client = {
-    id: newId(),
-    manager: managerMatch,
-    nombre,
-    telefono,
-    direccion,
-    fechaCita,
-    idioma,
-    notas,
-    estado: "Activo",
-    fechaPago: "",
-    revisar: false,
-  };
-  state.clients.push(client);
-  await s.setJSON("state", state);
+// Este guardado escribe SOLO la llave de este cliente nuevo. No toca
+// ninguna otra llave, asi que no puede borrar cambios que otra persona
+// (o otra cita) haya guardado al mismo tiempo.
+await saveClient(client);
 
-  return json({ ok: true, created: true, duplicate: false, clientId: client.id });
+return json({ ok: true, created: true, duplicate: false, clientId: client.id });
 };
 
 export const config: Config = {
-  path: "/api/appointment",
+path: "/api/appointment",
 };
