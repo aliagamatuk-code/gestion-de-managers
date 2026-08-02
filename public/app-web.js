@@ -13,7 +13,6 @@ const LOCK_KEY = "gestion-managers-device-lock";
 let STATE = null;          // {managers:[], clients:[]}
 let CURRENT_USER = null;   // {type:'admin'} or {type:'manager', name:'...'}
 let openCards = new Set();
-let saveTimer = null;
 
 /* ===================== STORAGE HELPERS (real backend via /api) ===================== */
 async function loadShared(){
@@ -23,16 +22,45 @@ async function loadShared(){
     return await r.json();
   }catch(e){ return null; }
 }
-async function saveShared(state){
+
+// Cada cambio se guarda de inmediato, uno por uno (un cliente, o un
+// manager), en vez de reescribir toda la lista junta. Asi, si Omar y
+// una cita nueva por Webhook guardan casi al mismo tiempo, nunca se
+// borran entre si.
+async function saveClientRemote(client){
   try{
-    const r = await fetch('/api/data', {
+    const r = await fetch('/api/client', {
       method:'POST',
       headers:{'content-type':'application/json'},
-      body: JSON.stringify(state)
+      body: JSON.stringify(client)
+    });
+    const data = await r.json().catch(()=>({}));
+    return {ok:r.ok, data};
+  }catch(e){ return {ok:false, data:{}}; }
+}
+async function deleteClientRemote(id){
+  try{
+    const r = await fetch('/api/client?id='+encodeURIComponent(id), {method:'DELETE'});
+    return r.ok;
+  }catch(e){ return false; }
+}
+async function addManagerRemote(name){
+  try{
+    const r = await fetch('/api/manager', {
+      method:'POST',
+      headers:{'content-type':'application/json'},
+      body: JSON.stringify({name})
     });
     return r.ok;
   }catch(e){ return false; }
 }
+async function deleteManagerRemote(name){
+  try{
+    const r = await fetch('/api/manager?name='+encodeURIComponent(name), {method:'DELETE'});
+    return r.ok;
+  }catch(e){ return false; }
+}
+
 function loadLock(){
   try{
     const v = localStorage.getItem(LOCK_KEY);
@@ -86,21 +114,24 @@ async function restoreBackup(id){
   }catch(e){ return false; }
 }
 
-/* ===================== SAVE (debounced) ===================== */
-function scheduleSave(){
-  clearTimeout(saveTimer);
-  saveTimer = setTimeout(doSave, 400);
+/* ===================== AVISO DE GUARDADO ===================== */
+function saveClientAndBadge(client){
+  saveClientRemote(client).then(res => showBadge(res.ok));
 }
-async function doSave(){
-  const ok = await saveShared(STATE);
-  showBadge(ok);
+function deleteClientAndBadge(id){
+  deleteClientRemote(id).then(ok => showBadge(ok));
+}
+function addManagerAndBadge(name){
+  addManagerRemote(name).then(ok => showBadge(ok));
+}
+function deleteManagerAndBadge(name){
+  deleteManagerRemote(name).then(ok => showBadge(ok));
 }
 function showBadge(ok){
   const b = document.getElementById("savebadge");
-  b.textContent = ok ? "Guardado ✓" : "Error al guardar, reintentando…";
+  b.textContent = ok ? "Guardado ✓" : "Error al guardar";
   b.className = "savebadge show" + (ok ? "" : " err");
   setTimeout(()=>{ b.className = "savebadge"; }, 1600);
-  if(!ok) scheduleSave();
 }
 
 /* ===================== NORMALIZATION / DUPLICATES ===================== */
@@ -126,9 +157,9 @@ async function init(){
   if(!STATE.managers) STATE.managers = [];
   if(!STATE.clients) STATE.clients = [];
 
-  await maybeAutoBackup();
+await maybeAutoBackup();
 
-  const lock = await loadLock();
+const lock = await loadLock();
   if(lock && lock.type === "admin"){ CURRENT_USER = {type:"admin"}; }
   else if(lock && lock.type === "manager" && STATE.managers.includes(lock.name)){
     CURRENT_USER = {type:"manager", name: lock.name};
@@ -159,13 +190,13 @@ function renderLock(){
   const wrap = document.createElement("div");
   wrap.className = "lockwrap";
   wrap.innerHTML = `
-    <h1>Gestión de Managers</h1>
-    <p>Quantica360 — selecciona tu nombre para continuar</p>
+  <h1>Gestión de Managers</h1>
+  <p>Quantica360 — selecciona tu nombre para continuar</p>
   `;
   const grid = document.createElement("div");
   grid.className = "namegrid";
 
-  const adminBtn = document.createElement("button");
+const adminBtn = document.createElement("button");
   adminBtn.className = "namebtn admin";
   adminBtn.textContent = "👑 Omar (Admin — ve todo)";
   adminBtn.onclick = async () => {
@@ -175,17 +206,17 @@ function renderLock(){
   };
   grid.appendChild(adminBtn);
 
-  STATE.managers.forEach(m => {
-    const b = document.createElement("button");
-    b.className = "namebtn";
-    b.textContent = m;
-    b.onclick = async () => {
-      await saveLock({type:"manager", name:m});
-      CURRENT_USER = {type:"manager", name:m};
-      render();
-    };
-    grid.appendChild(b);
-  });
+STATE.managers.forEach(m => {
+  const b = document.createElement("button");
+  b.className = "namebtn";
+  b.textContent = m;
+  b.onclick = async () => {
+    await saveLock({type:"manager", name:m});
+    CURRENT_USER = {type:"manager", name:m};
+    render();
+  };
+  grid.appendChild(b);
+});
   wrap.appendChild(grid);
   const note = document.createElement("p");
   note.style.marginTop = "22px";
@@ -195,13 +226,14 @@ function renderLock(){
   return wrap;
 }
 
+
 /* ===================== HEADER ===================== */
 function renderHeader(){
   const h = document.createElement("header");
   h.className = "top";
   const who = CURRENT_USER.type === "admin" ? "Admin — Omar" : CURRENT_USER.name;
   h.innerHTML = `
-    <div class="brand"><b>Gestión de Managers</b><span>${who}</span></div>
+  <div class="brand"><b>Gestión de Managers</b><span>${who}</span></div>
   `;
   const btn = document.createElement("button");
   btn.className = "iconbtn";
@@ -214,13 +246,13 @@ function renderHeader(){
 function openMenuModal(){
   const body = document.createElement("div");
   body.innerHTML = `
-    <h3>Menú</h3>
-    <div class="modalbtns" style="flex-direction:column;">
-      ${CURRENT_USER.type==="admin" ? '<button class="btnok" id="mnuExport">⬇️ Exportar Excel</button>' : ''}
-      ${CURRENT_USER.type==="admin" ? '<button class="btnok" id="mnuBackup" style="background:var(--teal-dark);">🗄️ Respaldos</button>' : ''}
-      <button class="btncancel" id="mnuInstall">📲 Instrucciones para instalar como app</button>
-      <button class="btndanger" id="mnuLogout">🔒 Cambiar de usuario</button>
-    </div>
+  <h3>Menú</h3>
+  <div class="modalbtns" style="flex-direction:column;">
+  ${CURRENT_USER.type==="admin" ? '<button class="btnok" id="mnuExport">⬇️ Exportar Excel</button>' : ''}
+  ${CURRENT_USER.type==="admin" ? '<button class="btnok" id="mnuBackup" style="background:var(--teal-dark);">🗄️ Respaldos</button>' : ''}
+  <button class="btncancel" id="mnuInstall">📲 Instrucciones para instalar como app</button>
+  <button class="btndanger" id="mnuLogout">🔒 Cambiar de usuario</button>
+  </div>
   `;
   const close = showModal(body);
   if(CURRENT_USER.type==="admin"){
@@ -234,12 +266,12 @@ function openMenuModal(){
 function confirmLogout(){
   const body = document.createElement("div");
   body.innerHTML = `
-    <h3>¿Cambiar de usuario?</h3>
-    <p style="font-size:13px;color:var(--muted);">Esto va a olvidar quién eres en este dispositivo. Vas a tener que volver a seleccionar tu nombre. Los datos no se borran.</p>
-    <div class="modalbtns">
-      <button class="btncancel" id="cLNo">Cancelar</button>
-      <button class="btndanger" id="cLYes">Sí, cambiar</button>
-    </div>
+  <h3>¿Cambiar de usuario?</h3>
+  <p style="font-size:13px;color:var(--muted);">Esto va a olvidar quién eres en este dispositivo. Vas a tener que volver a seleccionar tu nombre. Los datos no se borran.</p>
+  <div class="modalbtns">
+  <button class="btncancel" id="cLNo">Cancelar</button>
+  <button class="btndanger" id="cLYes">Sí, cambiar</button>
+  </div>
   `;
   const close = showModal(body);
   body.querySelector("#cLNo").onclick = close;
@@ -277,8 +309,8 @@ function renderSummary(){
     const n = counts[e] || 0;
     const pct = Math.round((n/total)*100);
     rows += `<div class="sumrow"><div class="lbl">${e}</div>
-      <div class="bar"><i style="width:${pct}%;background:${ESTADO_COLOR[e]}"></i></div>
-      <div class="val">${n} (${pct}%)</div></div>`;
+    <div class="bar"><i style="width:${pct}%;background:${ESTADO_COLOR[e]}"></i></div>
+    <div class="val">${n} (${pct}%)</div></div>`;
   });
   box.innerHTML = `<h3>Reporte general — ${STATE.clients.length} clientes en ${STATE.managers.length} managers</h3>${rows}`;
   return box;
@@ -301,7 +333,6 @@ function donutStyle(clients){
   return `background:conic-gradient(${parts.join(",")});`;
 }
 function cssColor(varStr){
-  // varStr like "var(--st-activo)" -> resolve to actual hex for conic-gradient (some browsers need literal)
   const map = {
     "var(--st-activo)":"#2E6FC4","var(--st-pendiente)":"#8A8F98","var(--st-reprogramado)":"#7B4FC9",
     "var(--st-novendio)":"#C4472B","var(--st-vendidopend)":"#D98B1F","var(--st-pagado)":"#1E8A5A"
@@ -313,14 +344,14 @@ function cssColor(varStr){
 function deleteManager(managerName){
   const count = STATE.clients.filter(c => c.manager === managerName).length;
   const aviso = count > 0
-    ? `El manager "${managerName}" tiene ${count} cliente${count===1?"":"s"}. Si lo eliminas, esos clientes también se van a borrar. ¿Seguro que quieres continuar?`
+  ? `El manager "${managerName}" tiene ${count} cliente${count===1?"":"s"}. Si lo eliminas, esos clientes también se van a borrar. ¿Seguro que quieres continuar?`
     : `¿Eliminar al manager "${managerName}"? No tiene clientes cargados.`;
   if(!confirm(aviso)) return;
   if(count > 0 && !confirm(`Última confirmación: se van a borrar ${count} cliente${count===1?"":"s"} de "${managerName}" para siempre. ¿Continuar?`)) return;
   STATE.managers = STATE.managers.filter(m => m !== managerName);
   STATE.clients = STATE.clients.filter(c => c.manager !== managerName);
   openCards.delete(managerName);
-  scheduleSave();
+  deleteManagerAndBadge(managerName);
   render();
 }
 
@@ -329,12 +360,12 @@ function renderManagerCard(managerName, collapsible){
   const card = document.createElement("div");
   card.className = "mgrcard" + (openCards.has(managerName) || !collapsible ? " open" : "");
 
-  const head = document.createElement("div");
+const head = document.createElement("div");
   head.className = "mgrhead";
   head.innerHTML = `
-    <div class="donut" style="${donutStyle(clients)}"></div>
-    <div class="info"><b>${managerName}</b><span>${clients.length} cliente${clients.length===1?"":"s"}</span></div>
-    ${collapsible ? '<div class="chev">▾</div>' : ''}
+  <div class="donut" style="${donutStyle(clients)}"></div>
+  <div class="info"><b>${managerName}</b><span>${clients.length} cliente${clients.length===1?"":"s"}</span></div>
+  ${collapsible ? '<div class="chev">▾</div>' : ''}
   `;
   if(collapsible){
     head.onclick = () => {
@@ -345,22 +376,22 @@ function renderManagerCard(managerName, collapsible){
   }
   card.appendChild(head);
 
-  const body = document.createElement("div");
+const body = document.createElement("div");
   body.className = "mgrbody";
 
-  const btnrow = document.createElement("div");
+const btnrow = document.createElement("div");
   btnrow.className = "cardbtns";
   btnrow.innerHTML = `
-    <button class="actionbtn primary" data-act="ai">🤖 Pegar y cargar con IA</button>
-    <button class="actionbtn" data-act="manual">➕ Agregar cliente</button>
-    <button class="actionbtn" data-act="delmgr" style="color:#c0504d">🗑️ Eliminar manager</button>
+  <button class="actionbtn primary" data-act="ai">🤖 Pegar y cargar con IA</button>
+  <button class="actionbtn" data-act="manual">➕ Agregar cliente</button>
+  <button class="actionbtn" data-act="delmgr" style="color:#c0504d">🗑️ Eliminar manager</button>
   `;
   btnrow.querySelector('[data-act="ai"]').onclick = () => openAiPasteModal(managerName);
   btnrow.querySelector('[data-act="manual"]').onclick = () => openClientForm(managerName, null);
   btnrow.querySelector('[data-act="delmgr"]').onclick = () => deleteManager(managerName);
   body.appendChild(btnrow);
 
-  const list = document.createElement("div");
+const list = document.createElement("div");
   list.className = "clientlist";
   list.style.marginTop = "12px";
   if(clients.length === 0){
@@ -379,17 +410,18 @@ function renderClientCard(c){
   el.className = "clientcard";
   const telHref = c.telefono ? `tel:${c.telefono.replace(/[^0-9+]/g,"")}` : "#";
   el.innerHTML = `
-    <div class="cname">${c.nombre}</div>
-    <div class="cmeta">
-      ${c.telefono ? `📞 <a href="${telHref}">${c.telefono}</a><br>` : ""}
-      ${c.direccion ? `📍 ${c.direccion}<br>` : ""}
-      ${c.fechaCita ? `🗓️ ${c.fechaCita}<br>` : ""}
-      ${c.idioma ? `🗣️ Idioma: ${c.idioma}<br>` : ""}
-      ${c.notas ? `📝 ${c.notas}` : ""}
-    </div>
-    ${c.revisar ? '<div class="revisarflag">⚠️ Revisar: estado heredado del sistema anterior</div>' : ""}
+  <div class="cname">${c.nombre}</div>
+  <div class="cmeta">
+  ${c.telefono ? `📞 <a href="${telHref}">${c.telefono}</a><br>` : ""}
+  ${c.direccion ? `📍 ${c.direccion}<br>` : ""}
+  ${c.fechaCita ? `🗓️ ${c.fechaCita}<br>` : ""}
+  ${c.idioma ? `🗣️ Idioma: ${c.idioma}<br>` : ""}
+  ${c.notas ? `📝 ${c.notas}` : ""}
+  </div>
+  ${c.revisar ? '<div class="revisarflag">⚠️ Revisar: estado heredado del sistema anterior</div>' : ""}
   `;
-  const srow = document.createElement("div");
+
+const srow = document.createElement("div");
   srow.className = "statusrow";
   ESTADOS.forEach(e => {
     const pill = document.createElement("button");
@@ -399,20 +431,20 @@ function renderClientCard(c){
     pill.onclick = () => {
       c.estado = e;
       c.revisar = false;
-      scheduleSave();
+      saveClientAndBadge(c);
       render();
     };
     srow.appendChild(pill);
   });
   el.appendChild(srow);
 
-  const payWrap = document.createElement("div");
+const payWrap = document.createElement("div");
   if(c.fechaPago){
     payWrap.innerHTML = `<span class="paydateset">💰 Fecha de pago: ${formatDate(c.fechaPago)}
-      <button data-x="clr">✕</button></span>`;
+    <button data-x="clr">✕</button></span>`;
     payWrap.querySelector('[data-x="clr"]').onclick = () => {
       c.fechaPago = "";
-      scheduleSave();
+      saveClientAndBadge(c);
       render();
     };
   } else {
@@ -424,7 +456,7 @@ function renderClientCard(c){
   }
   el.appendChild(payWrap);
 
-  const actions = document.createElement("div");
+const actions = document.createElement("div");
   actions.className = "cactions";
   const editBtn = document.createElement("button");
   editBtn.className = "miniBtn";
@@ -438,7 +470,7 @@ function renderClientCard(c){
   actions.appendChild(delBtn);
   el.appendChild(actions);
 
-  return el;
+return el;
 }
 function formatDate(iso){
   if(!iso) return "";
@@ -449,19 +481,19 @@ function formatDate(iso){
 function openPayDateModal(c){
   const body = document.createElement("div");
   body.innerHTML = `
-    <h3>Fecha de pago — ${c.nombre}</h3>
-    <label>Selecciona la fecha</label>
-    <input type="date" id="payInput" value="${c.fechaPago || ""}">
-    <div class="modalbtns">
-      <button class="btncancel" id="payCancel">Cancelar</button>
-      <button class="btnok" id="paySave">Guardar</button>
-    </div>
+  <h3>Fecha de pago — ${c.nombre}</h3>
+  <label>Selecciona la fecha</label>
+  <input type="date" id="payInput" value="${c.fechaPago || ""}">
+  <div class="modalbtns">
+  <button class="btncancel" id="payCancel">Cancelar</button>
+  <button class="btnok" id="paySave">Guardar</button>
+  </div>
   `;
   const close = showModal(body);
   body.querySelector("#payCancel").onclick = close;
   body.querySelector("#paySave").onclick = () => {
     const v = body.querySelector("#payInput").value;
-    if(v){ c.fechaPago = v; scheduleSave(); }
+    if(v){ c.fechaPago = v; saveClientAndBadge(c); }
     close(); render();
   };
 }
@@ -469,18 +501,18 @@ function openPayDateModal(c){
 function confirmDeleteClient(c){
   const body = document.createElement("div");
   body.innerHTML = `
-    <h3>¿Eliminar cliente?</h3>
-    <p style="font-size:13px;color:var(--muted);">${c.nombre} se va a eliminar permanentemente.</p>
-    <div class="modalbtns">
-      <button class="btncancel" id="dNo">Cancelar</button>
-      <button class="btndanger" id="dYes">Eliminar</button>
-    </div>
+  <h3>¿Eliminar cliente?</h3>
+  <p style="font-size:13px;color:var(--muted);">${c.nombre} se va a eliminar permanentemente.</p>
+  <div class="modalbtns">
+  <button class="btncancel" id="dNo">Cancelar</button>
+  <button class="btndanger" id="dYes">Eliminar</button>
+  </div>
   `;
   const close = showModal(body);
   body.querySelector("#dNo").onclick = close;
   body.querySelector("#dYes").onclick = () => {
     STATE.clients = STATE.clients.filter(x => x.id !== c.id);
-    scheduleSave();
+    deleteClientAndBadge(c.id);
     close(); render();
   };
 }
@@ -490,30 +522,30 @@ function openClientForm(managerName, existing){
   const body = document.createElement("div");
   body.className = "modalhead";
   body.innerHTML = `
-    <button class="closeX" id="cfX">✕</button>
-    <h3>${existing ? "Editar cliente" : "Agregar cliente"} — ${managerName}</h3>
-    <label>Nombre completo</label>
-    <input type="text" id="cfNombre" value="${existing ? esc(existing.nombre) : ""}">
-    <label>Teléfono</label>
-    <input type="tel" id="cfTelefono" value="${existing ? esc(existing.telefono) : ""}">
-    <label>Dirección</label>
-    <input type="text" id="cfDireccion" value="${existing ? esc(existing.direccion) : ""}">
-    <label>Fecha de asignación / cita</label>
-    <input type="text" id="cfFecha" placeholder="ej. 20/7/2026, 14:00" value="${existing ? esc(existing.fechaCita) : ""}">
-    <label>Idioma preferido</label>
-    <input type="text" id="cfIdioma" placeholder="Español / Inglés" value="${existing ? esc(existing.idioma) : ""}">
-    <label>Observaciones / notas</label>
-    <textarea id="cfNotas">${existing ? esc(existing.notas) : ""}</textarea>
-    <div id="cfDupe"></div>
-    <div class="modalbtns">
-      <button class="btncancel" id="cfCancel">Cancelar</button>
-      <button class="btnok" id="cfSave">Guardar</button>
-    </div>
+  <button class="closeX" id="cfX">✕</button>
+  <h3>${existing ? "Editar cliente" : "Agregar cliente"} — ${managerName}</h3>
+  <label>Nombre completo</label>
+  <input type="text" id="cfNombre" value="${existing ? esc(existing.nombre) : ""}">
+  <label>Teléfono</label>
+  <input type="tel" id="cfTelefono" value="${existing ? esc(existing.telefono) : ""}">
+  <label>Dirección</label>
+  <input type="text" id="cfDireccion" value="${existing ? esc(existing.direccion) : ""}">
+  <label>Fecha de asignación / cita</label>
+  <input type="text" id="cfFecha" placeholder="ej. 20/7/2026, 14:00" value="${existing ? esc(existing.fechaCita) : ""}">
+  <label>Idioma preferido</label>
+  <input type="text" id="cfIdioma" placeholder="Español / Inglés" value="${existing ? esc(existing.idioma) : ""}">
+  <label>Observaciones / notas</label>
+  <textarea id="cfNotas">${existing ? esc(existing.notas) : ""}</textarea>
+  <div id="cfDupe"></div>
+  <div class="modalbtns">
+  <button class="btncancel" id="cfCancel">Cancelar</button>
+  <button class="btnok" id="cfSave">Guardar</button>
+  </div>
   `;
   const close = showModal(body);
   body.querySelector("#cfX").onclick = close;
   body.querySelector("#cfCancel").onclick = close;
-  body.querySelector("#cfSave").onclick = () => {
+  body.querySelector("#cfSave").onclick = async () => {
     const nombre = body.querySelector("#cfNombre").value.trim();
     const telefono = body.querySelector("#cfTelefono").value.trim();
     if(!nombre){ body.querySelector("#cfNombre").focus(); return; }
@@ -530,15 +562,23 @@ function openClientForm(managerName, existing){
       idioma: body.querySelector("#cfIdioma").value.trim(),
       notas: body.querySelector("#cfNotas").value.trim(),
     };
+    const saveBtn = body.querySelector("#cfSave");
+    saveBtn.disabled = true;
+    saveBtn.textContent = "Guardando…";
     if(existing){
       Object.assign(existing, data);
+      const res = await saveClientRemote(existing);
+      showBadge(res.ok);
+      close(); render();
     } else {
-      STATE.clients.push({
-        id: newId(), manager: managerName, estado:"Pendiente", fechaPago:"", revisar:false, ...data
-      });
+      const newClient = { manager: managerName, estado:"Pendiente", fechaPago:"", revisar:false, ...data };
+      const res = await saveClientRemote(newClient);
+      showBadge(res.ok);
+      if(res.ok && res.data && res.data.client){
+        STATE.clients.push(res.data.client);
+      }
+      close(); render();
     }
-    scheduleSave();
-    close(); render();
   };
 }
 function esc(s){ return (s||"").toString().replace(/"/g,"&quot;").replace(/</g,"&lt;"); }
@@ -547,15 +587,15 @@ function esc(s){ return (s||"").toString().replace(/"/g,"&quot;").replace(/</g,"
 function openAiPasteModal(managerName){
   const body = document.createElement("div");
   body.innerHTML = `
-    <h3>🤖 Pegar y cargar con IA — ${managerName}</h3>
-    <label>Pega el bloque de texto con los datos de los clientes</label>
-    <textarea id="aiText" placeholder="Pega aquí el mensaje de WhatsApp, la lista de citas, etc."></textarea>
-    <div class="helptext">La IA va a identificar nombre, teléfono, dirección, fecha e idioma automáticamente. Los duplicados se omiten solos.</div>
-    <div id="aiStatus"></div>
-    <div class="modalbtns">
-      <button class="btncancel" id="aiCancel">Cancelar</button>
-      <button class="btnok" id="aiGo">Cargar con IA</button>
-    </div>
+  <h3>🤖 Pegar y cargar con IA — ${managerName}</h3>
+  <label>Pega el bloque de texto con los datos de los clientes</label>
+  <textarea id="aiText" placeholder="Pega aquí el mensaje de WhatsApp, la lista de citas, etc."></textarea>
+  <div class="helptext">La IA va a identificar nombre, teléfono, dirección, fecha e idioma automáticamente. Los duplicados se omiten solos.</div>
+  <div id="aiStatus"></div>
+  <div class="modalbtns">
+  <button class="btncancel" id="aiCancel">Cancelar</button>
+  <button class="btnok" id="aiGo">Cargar con IA</button>
+  </div>
   `;
   const close = showModal(body);
   body.querySelector("#aiCancel").onclick = close;
@@ -574,18 +614,24 @@ function openAiPasteModal(managerName){
         return;
       }
       let added = 0, skipped = [];
+      const toSave = [];
       parsed.forEach(p => {
         if(!p.nombre) return;
         const dupe = findDuplicate(p.nombre, p.telefono, null);
         if(dupe){ skipped.push(p.nombre); return; }
-        STATE.clients.push({
-          id: newId(), manager: managerName, estado:"Pendiente", fechaPago:"", revisar:false,
+        toSave.push({
+          manager: managerName, estado:"Pendiente", fechaPago:"", revisar:false,
           nombre: p.nombre || "", telefono: p.telefono || "", direccion: p.direccion || "",
           fechaCita: p.fechaCita || "", idioma: p.idioma || "", notas: p.notas || ""
         });
-        added++;
       });
-      scheduleSave();
+      const results = await Promise.all(toSave.map(nc => saveClientRemote(nc)));
+      results.forEach(res => {
+        if(res.ok && res.data && res.data.client){
+          STATE.clients.push(res.data.client);
+          added++;
+        }
+      });
       let msg = `<div class="helptext">✅ ${added} cliente(s) agregado(s).`;
       if(skipped.length) msg += ` Omitidos por duplicado: ${skipped.join(", ")}.`;
       msg += `</div>`;
@@ -593,7 +639,7 @@ function openAiPasteModal(managerName){
       setTimeout(()=>{ close(); render(); }, 1400);
     }catch(e){
       const msg = e.code === "missing_api_key"
-        ? "Falta configurar la clave de IA en el servidor (ANTHROPIC_API_KEY). Avísale al administrador."
+      ? "Falta configurar la clave de IA en el servidor (ANTHROPIC_API_KEY). Avísale al administrador."
         : "Error al procesar con IA. Intenta de nuevo o usa el formulario manual.";
       statusEl.innerHTML = `<div class="dupewarn">${msg}</div>`;
       goBtn.disabled = false;
@@ -621,9 +667,9 @@ function renderAdminToolbar(){
   const box = document.createElement("div");
   box.className = "toolbar";
   box.innerHTML = `
-    <button class="toolbtn" id="tbAddMgr">➕ Agregar manager</button>
-    <button class="toolbtn" id="tbExport">⬇️ Exportar Excel</button>
-    <button class="toolbtn" id="tbBackup">🗄️ Respaldos</button>
+  <button class="toolbtn" id="tbAddMgr">➕ Agregar manager</button>
+  <button class="toolbtn" id="tbExport">⬇️ Exportar Excel</button>
+  <button class="toolbtn" id="tbBackup">🗄️ Respaldos</button>
   `;
   box.querySelector("#tbAddMgr").onclick = openAddManagerModal;
   box.querySelector("#tbExport").onclick = exportExcel;
@@ -634,13 +680,13 @@ function renderAdminToolbar(){
 function openAddManagerModal(){
   const body = document.createElement("div");
   body.innerHTML = `
-    <h3>Agregar manager</h3>
-    <label>Nombre del manager</label>
-    <input type="text" id="mgrName" placeholder="Nombre completo">
-    <div class="modalbtns">
-      <button class="btncancel" id="amCancel">Cancelar</button>
-      <button class="btnok" id="amSave">Agregar</button>
-    </div>
+  <h3>Agregar manager</h3>
+  <label>Nombre del manager</label>
+  <input type="text" id="mgrName" placeholder="Nombre completo">
+  <div class="modalbtns">
+  <button class="btncancel" id="amCancel">Cancelar</button>
+  <button class="btnok" id="amSave">Agregar</button>
+  </div>
   `;
   const close = showModal(body);
   body.querySelector("#amCancel").onclick = close;
@@ -649,7 +695,7 @@ function openAddManagerModal(){
     if(!name) return;
     if(STATE.managers.includes(name)){ alert("Ese manager ya existe."); return; }
     STATE.managers.push(name);
-    scheduleSave();
+    addManagerAndBadge(name);
     close(); render();
   };
 }
@@ -658,7 +704,7 @@ function openAddManagerModal(){
 async function openBackupModal(){
   const body = document.createElement("div");
   body.innerHTML = `<h3>Respaldos</h3><div id="bkList">Cargando…</div>
-    <div class="modalbtns"><button class="btnok" id="bkMake">Crear respaldo manual ahora</button></div>`;
+  <div class="modalbtns"><button class="btnok" id="bkMake">Crear respaldo manual ahora</button></div>`;
   const close = showModal(body);
   async function refresh(){
     const idx = await getBackupIndex();
@@ -668,7 +714,7 @@ async function openBackupModal(){
       const d = new Date(b.stamp);
       const label = d.toLocaleString("es", {dateStyle:"medium", timeStyle:"short"});
       return `<div class="backuprow"><span>${label} ${b.manual?"(manual)":"(auto)"} · ${b.count} clientes</span>
-        <button data-id="${b.id}">Restaurar</button></div>`;
+      <button data-id="${b.id}">Restaurar</button></div>`;
     }).join("");
     list.querySelectorAll("button[data-id]").forEach(btn => {
       btn.onclick = () => confirmRestore(btn.dataset.id, close);
@@ -684,12 +730,12 @@ async function openBackupModal(){
 function confirmRestore(id, closeParent){
   const body = document.createElement("div");
   body.innerHTML = `
-    <h3>¿Restaurar este respaldo?</h3>
-    <p style="font-size:13px;color:var(--muted);">Esto va a reemplazar TODOS los datos actuales por los del respaldo. No se puede deshacer.</p>
-    <div class="modalbtns">
-      <button class="btncancel" id="rNo">Cancelar</button>
-      <button class="btndanger" id="rYes">Sí, restaurar</button>
-    </div>
+  <h3>¿Restaurar este respaldo?</h3>
+  <p style="font-size:13px;color:var(--muted);">Esto va a reemplazar TODOS los datos actuales por los del respaldo. No se puede deshacer.</p>
+  <div class="modalbtns">
+  <button class="btncancel" id="rNo">Cancelar</button>
+  <button class="btndanger" id="rYes">Sí, restaurar</button>
+  </div>
   `;
   const close = showModal(body);
   body.querySelector("#rNo").onclick = close;
@@ -706,16 +752,16 @@ function confirmRestore(id, closeParent){
 function openInstallModal(){
   const body = document.createElement("div");
   body.innerHTML = `
-    <h3>📲 Instalar como app</h3>
-    <div class="installsteps">
-      Esta app ya vive en su propio link fijo — no depende de Claude ni de publicar nada.<br><br>
-      <b>En Android (Chrome):</b><br>
-      Toca los <b>tres puntos (⋮)</b> arriba a la derecha → <b>Agregar a pantalla de inicio</b>.<br><br>
-      <b>En iPhone (Safari):</b><br>
-      Toca el ícono de <b>Compartir</b> (cuadro con flecha) → <b>Agregar a pantalla de inicio</b>.<br><br>
-      El ícono va a quedar fijo y va a abrir la app directamente, sin pasar por el navegador.
-    </div>
-    <div class="modalbtns"><button class="btnok" id="instClose">Entendido</button></div>
+  <h3>📲 Instalar como app</h3>
+  <div class="installsteps">
+  Esta app ya vive en su propio link fijo — no depende de Claude ni de publicar nada.<br><br>
+  <b>En Android (Chrome):</b><br>
+  Toca los <b>tres puntos (⋮)</b> arriba a la derecha → <b>Agregar a pantalla de inicio</b>.<br><br>
+  <b>En iPhone (Safari):</b><br>
+  Toca el ícono de <b>Compartir</b> (cuadro con flecha) → <b>Agregar a pantalla de inicio</b>.<br><br>
+  El ícono va a quedar fijo y va a abrir la app directamente, sin pasar por el navegador.
+  </div>
+  <div class="modalbtns"><button class="btnok" id="instClose">Entendido</button></div>
   `;
   const close = showModal(body);
   body.querySelector("#instClose").onclick = close;
@@ -726,16 +772,15 @@ function exportExcel(){
   const wb = XLSX.utils.book_new();
   const headers = ["#","Manager","Nombre","Teléfono","Dirección","Fecha Cita","Idioma","Notas","Estado","Fecha de pago"];
 
-  function sheetFor(clients){
-    const rows = [headers];
-    clients.forEach((c,i) => rows.push([i+1, c.manager, c.nombre, c.telefono, c.direccion, c.fechaCita, c.idioma, c.notas, c.estado, c.fechaPago ? formatDate(c.fechaPago) : ""]));
-    return XLSX.utils.aoa_to_sheet(rows);
-  }
+function sheetFor(clients){
+  const rows = [headers];
+  clients.forEach((c,i) => rows.push([i+1, c.manager, c.nombre, c.telefono, c.direccion, c.fechaCita, c.idioma, c.notas, c.estado, c.fechaPago ? formatDate(c.fechaPago) : ""]));
+  return XLSX.utils.aoa_to_sheet(rows);
+}
 
-  XLSX.utils.book_append_sheet(wb, sheetFor(STATE.clients), "Todos los clientes");
+XLSX.utils.book_append_sheet(wb, sheetFor(STATE.clients), "Todos los clientes");
 
-  // Resumen
-  const resumenRows = [["Manager", ...ESTADOS, "Total"]];
+const resumenRows = [["Manager", ...ESTADOS, "Total"]];
   STATE.managers.forEach(m => {
     const clients = STATE.clients.filter(c=>c.manager===m);
     const row = [m];
@@ -745,13 +790,13 @@ function exportExcel(){
   });
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(resumenRows), "Resumen");
 
-  STATE.managers.forEach(m => {
-    const clients = STATE.clients.filter(c=>c.manager===m);
-    const safe = m.slice(0,31);
-    XLSX.utils.book_append_sheet(wb, sheetFor(clients), safe);
-  });
+STATE.managers.forEach(m => {
+  const clients = STATE.clients.filter(c=>c.manager===m);
+  const safe = m.slice(0,31);
+  XLSX.utils.book_append_sheet(wb, sheetFor(clients), safe);
+});
 
-  const stamp = todayStr();
+const stamp = todayStr();
   XLSX.writeFile(wb, `managers_${stamp}.xlsx`);
 }
 
