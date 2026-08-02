@@ -4,12 +4,16 @@
 // alguien guarda un cambio (el panel de Omar, o una cita nueva por
 // Webhook) nunca puede borrar sin querer lo que otra persona acaba
 // de guardar al mismo tiempo.
+//
+// Ademas se usa consistencia FUERTE (consistency: 'strong') para que
+// un cliente nuevo aparezca de inmediato en la lista, en vez de tardar
+// hasta 60 segundos (comportamiento por defecto de Netlify Blobs).
 
 import { getStore } from "@netlify/blobs";
 import SEED from "./seed-data.mts";
 
 export function store() {
-  return getStore("gestion-managers");
+return getStore("gestion-managers", { consistency: "strong" });
 }
 
 const MIGRATION_KEY = "migrated-to-v2";
