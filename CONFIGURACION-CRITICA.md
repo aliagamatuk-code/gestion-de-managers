@@ -216,5 +216,3 @@ Idioma preferido: {{contact.preferred_analyst_language}}".
 
 Fin (Finish): el workflow termina aqui. No hay ramas, condiciones
 escondidas ni pasos alternativos despues de este punto.
-Fin (Finish): el workflow termina aqui. No hay ramas, condiciones
-escondidas ni pasos alternativos despues de este punto.
