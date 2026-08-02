@@ -154,3 +154,67 @@ calendarios-managers-quantica360.netlify.app/api/managers.
 Sexto: si el cliente no aparece pero acaba de llegar hace menos de un
 minuto, espera un momento y recarga: puede ser el retraso normal de
 Netlify Blobs explicado arriba, no una perdida de datos.
+
+Copia de seguridad del Workflow "03 Appointment Booking" (guardada el 2 de agosto de 2026)
+--------------------------------------------------------------------------------------------------
+
+Esto es una fotografia exacta de como esta armado el Workflow HOY, paso
+por paso, tal como se ve en GHL, Automatizacion, "03 Appointment
+Booking". Si algun dia alguien lo cambia sin querer, o algo se rompe,
+usa esta lista para comparar cada paso del canvas contra lo que esta
+escrito aqui, de arriba hacia abajo, y corregir lo que no coincida. El
+workflow tiene un disparador y 9 pasos, sin ninguna rama ni condicion
+escondida.
+
+Disparador "Estado De La Cita": se inscribe Contact only. Filtro 1:
+Tipo de evento = Normal. Filtro 2: El estado de la cita es =
+confirmado.
+
+Paso Esperar (Wait): 3 minutos.
+
+Paso Actualizar campo de contacto (Update contact field): Language
+Text Sync = {{contact.preferred_analyst_language}}. Appointment Time
+Text Sync = {{appointment.start_time}}.
+
+Paso Webhook: metodo POST. URL exacta:
+https://regal-hamster-65a058.netlify.app/api/appointment?token=Q360-Citas-8f2k91
+Sin headers extra. Datos personalizados (customData), nombres
+exactos: calendarId = {{appointment.calendar_id}}, nombre =
+{{contact.first_name}} {{contact.last_name}}, telefono =
+{{contact.phone}}, direccion = {{contact.full_address}}, fechaCita =
+{{contact.appointment_time_text_sync}}, idioma =
+{{contact.language_text_sync}}.
+
+Paso Add Tag (primero): etiqueta booked.
+
+Paso Add Tag (segundo): etiqueta bot_off.
+
+Paso Update conversation AI bot and status: Change assigned
+Conversation AI bot = Keep Same. Update bot's status to = Inactive.
+Reactivate bot after: desactivado, sin reactivacion programada.
+
+Paso Crear o actualizar oportunidad: en la secuencia CONTROL DE
+VENTAS, en fase de la secuencia Booked Appointment. Nombre de la
+oportunidad: vacio. Fuente de oportunidad: vacio. Valor del cliente
+potencial: vacio. Estado: open. Permitir pasar a cualquier etapa
+anterior de la secuencia: desactivado.
+
+Paso SMS (mensaje que recibe el cliente): "Your appointment has been
+scheduled. Please remember that the follow-up is free of charge, and
+the presence of both heads of household is important." Sin plantilla
+seleccionada.
+
+Paso Internal Notification (aviso interno, no lo recibe el cliente):
+tipo de notificacion SMS. Para tipo de usuario: Particular User.
+Usuario seleccionado: Water Booking. Notifique a los seguidores:
+desactivado en las dos opciones (contactar seguidores y seguidores de
+la oportunidad). Mensaje: "Nueva cita agendada: Nombre:
+{{contact.name}} Telefono: {{contact.phone}} Direccion:
+{{contact.address1}} {{contact.city}}, {{contact.state}}
+{{contact.postal_code}} Fecha y hora: {{appointment.start_time}}
+Idioma preferido: {{contact.preferred_analyst_language}}".
+
+Fin (Finish): el workflow termina aqui. No hay ramas, condiciones
+escondidas ni pasos alternativos despues de este punto.
+Fin (Finish): el workflow termina aqui. No hay ramas, condiciones
+escondidas ni pasos alternativos despues de este punto.
