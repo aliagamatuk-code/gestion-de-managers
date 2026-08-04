@@ -9,21 +9,30 @@ const ESTADO_COLOR = {
   "Pagado":"var(--st-pagado)"
 };
 const LOCK_KEY = "gestion-managers-device-lock";
+// Guarda el codigo secreto del link personal de un manager en este
+// dispositivo, para que no tenga que volver a tocar el link cada vez
+// que abre la app (aunque el link siga siendo lo que le da acceso).
+const MGR_TOKEN_KEY = "gestion-managers-token";
 
 let STATE = null;          // {managers:[], clients:[]}
-let CURRENT_USER = null;   // {type:'admin'} or {type:'manager', name:'...'}
+let CURRENT_USER = null;   // {type:'admin'} or {type:'manager', name:'...', token:'...'}
 let openCards = new Set();
 
 /* ===================== STORAGE HELPERS (real backend via /api) ===================== */
-async function loadShared(){
+async function loadShared(token){
   try{
+    const url = token ? ('/api/data?token=' + encodeURIComponent(token)) : '/api/data';
     // cache:'no-store' obliga al navegador a pedir SIEMPRE los datos
     // reales al servidor, nunca una copia guardada en el celular/PC.
-    const r = await fetch('/api/data', { cache: 'no-store' });
-    if(!r.ok) return null;
-    return await r.json();
+    const r = await fetch(url, { cache: 'no-store' });
+    const data = await r.json().catch(()=>null);
+    if(!r.ok) return data || { error: "network" };
+    return data;
   }catch(e){ return null; }
 }
+
+function saveManagerToken(t){ try{ localStorage.setItem(MGR_TOKEN_KEY, t); }catch(e){} }
+function loadManagerToken(){ try{ return localStorage.getItem(MGR_TOKEN_KEY) || ""; }catch(e){ return ""; } }
 
 // Cada cambio se guarda de inmediato, uno por uno (un cliente, o un
 // manager), en vez de reescribir toda la lista junta. Asi, si Omar y
@@ -31,10 +40,16 @@ async function loadShared(){
 // borran entre si.
 async function saveClientRemote(client){
   try{
+    // Si quien guarda es un manager (entro por su link personal), le
+    // mandamos al servidor su codigo secreto junto con el cambio. El
+    // servidor usa ese codigo para saber quien es y que SI puede tocar.
+    const payload = (CURRENT_USER && CURRENT_USER.type === "manager")
+      ? { ...client, token: CURRENT_USER.token }
+      : client;
     const r = await fetch('/api/client', {
       method:'POST',
       headers:{'content-type':'application/json'},
-      body: JSON.stringify(client)
+      body: JSON.stringify(payload)
     });
     const data = await r.json().catch(()=>({}));
     return {ok:r.ok, data};
@@ -130,10 +145,13 @@ function deleteManagerAndBadge(name){
   deleteManagerRemote(name).then(ok => showBadge(ok));
 }
 function showBadge(ok){
+  showToast(ok ? "Guardado ✓" : "Error al guardar", !ok);
+}
+function showToast(msg, isErr){
   const b = document.getElementById("savebadge");
-  b.textContent = ok ? "Guardado ✓" : "Error al guardar";
-  b.className = "savebadge show" + (ok ? "" : " err");
-  setTimeout(()=>{ b.className = "savebadge"; }, 1600);
+  b.textContent = msg;
+  b.className = "savebadge show" + (isErr ? " err" : "");
+  setTimeout(()=>{ b.className = "savebadge"; }, 1800);
 }
 
 /* ===================== NORMALIZATION / DUPLICATES ===================== */
@@ -149,8 +167,38 @@ function newId(){
 
 /* ===================== INIT ===================== */
 async function init(){
+  // Si el link trae "?m=CODIGO", esta persona entro por el link
+  // personal de un manager. Guardamos ese codigo en el dispositivo
+  // (para que no tenga que reabrir el link cada vez) y limpiamos la
+  // URL visible, por prolijidad.
+  const params = new URLSearchParams(location.search);
+  const urlToken = params.get('m') || '';
+  if(urlToken){
+    saveManagerToken(urlToken);
+    history.replaceState({}, '', location.pathname);
+  }
+  // Si este dispositivo ya estaba configurado como el de Omar (admin)
+  // y no se acaba de tocar un link nuevo, no lo cambiamos a manager
+  // por accidente aunque alguna vez haya quedado guardado un token viejo.
+  const existingLock = loadLock();
+  const managerToken = urlToken || (existingLock && existingLock.type === "admin" ? "" : loadManagerToken());
+
+  if(managerToken){
+    const shared = await loadShared(managerToken);
+    if(!shared || shared.error || shared.role !== "manager"){
+      document.getElementById("root").innerHTML =
+        '<div class="lockwrap"><h1>Este link ya no funciona</h1><p>Pídele a Omar que te envíe tu link actualizado.</p></div>';
+      return;
+    }
+    STATE = { managers: [{name: shared.managerName, token: managerToken}], clients: shared.clients || [] };
+    CURRENT_USER = { type: "manager", name: shared.managerName, token: managerToken };
+    render();
+    return;
+  }
+
+  // ---- Entrada normal (sin link de manager): pantalla de Admin ----
   const shared = await loadShared();
-  if(!shared){
+  if(!shared || shared.error){
     document.getElementById("root").innerHTML =
       '<div class="lockwrap"><h1>No se pudo conectar</h1><p>No se pudo cargar el servidor de datos. Revisa tu conexión y recarga la página.</p></div>';
     return;
@@ -163,9 +211,6 @@ await maybeAutoBackup();
 
 const lock = await loadLock();
   if(lock && lock.type === "admin"){ CURRENT_USER = {type:"admin"}; }
-  else if(lock && lock.type === "manager" && STATE.managers.includes(lock.name)){
-    CURRENT_USER = {type:"manager", name: lock.name};
-  }
   render();
 }
 
@@ -180,20 +225,27 @@ function render(){
   if(CURRENT_USER.type === "admin"){
     app.appendChild(renderAdminToolbar());
     app.appendChild(renderSummary());
-    STATE.managers.forEach(m => app.appendChild(renderManagerCard(m, true)));
+    STATE.managers.forEach(m => app.appendChild(renderManagerCard(m.name, true, m.token)));
   } else {
-    app.appendChild(renderManagerCard(CURRENT_USER.name, false));
+    app.appendChild(renderManagerToolbar());
+    app.appendChild(renderManagerCard(CURRENT_USER.name, false, null));
   }
   root.appendChild(app);
 }
 
 /* ===================== LOCK SCREEN ===================== */
+// Ojo: aqui SOLO aparece la entrada del administrador. Los managers
+// ya no eligen su nombre de una lista (eso dejaba ver los nombres de
+// todos y cualquiera podia entrar como cualquiera). Ahora cada manager
+// entra unicamente con su propio link secreto (?m=codigo), que Omar
+// le manda por privado. Sin ese link, no hay forma de ver datos de
+// ningun manager desde esta pantalla.
 function renderLock(){
   const wrap = document.createElement("div");
   wrap.className = "lockwrap";
   wrap.innerHTML = `
   <h1>Gestión de Managers</h1>
-  <p>Quantica360 — selecciona tu nombre para continuar</p>
+  <p>Quantica360</p>
   `;
   const grid = document.createElement("div");
   grid.className = "namegrid";
@@ -207,23 +259,11 @@ const adminBtn = document.createElement("button");
     render();
   };
   grid.appendChild(adminBtn);
-
-STATE.managers.forEach(m => {
-  const b = document.createElement("button");
-  b.className = "namebtn";
-  b.textContent = m;
-  b.onclick = async () => {
-    await saveLock({type:"manager", name:m});
-    CURRENT_USER = {type:"manager", name:m};
-    render();
-  };
-  grid.appendChild(b);
-});
   wrap.appendChild(grid);
   const note = document.createElement("p");
   note.style.marginTop = "22px";
   note.style.fontSize = "11.5px";
-  note.textContent = "Este dispositivo recordará tu selección. Si te equivocaste, pide al administrador que lo reinicie desde el menú.";
+  note.textContent = "¿Eres manager? Usa el link personal que te mandó Omar — esta pantalla es solo para el administrador.";
   wrap.appendChild(note);
   return wrap;
 }
@@ -246,23 +286,24 @@ function renderHeader(){
 }
 
 function openMenuModal(){
+  const isAdmin = CURRENT_USER.type === "admin";
   const body = document.createElement("div");
   body.innerHTML = `
   <h3>Menú</h3>
   <div class="modalbtns" style="flex-direction:column;">
-  ${CURRENT_USER.type==="admin" ? '<button class="btnok" id="mnuExport">⬇️ Exportar Excel</button>' : ''}
-  ${CURRENT_USER.type==="admin" ? '<button class="btnok" id="mnuBackup" style="background:var(--teal-dark);">🗄️ Respaldos</button>' : ''}
+  ${isAdmin ? '<button class="btnok" id="mnuExport">⬇️ Exportar Excel</button>' : '<button class="btnok" id="mnuExport">⬇️ Exportar mi Excel</button>'}
+  ${isAdmin ? '<button class="btnok" id="mnuBackup" style="background:var(--teal-dark);">🗄️ Respaldos</button>' : ''}
   <button class="btncancel" id="mnuInstall">📲 Instrucciones para instalar como app</button>
-  <button class="btndanger" id="mnuLogout">🔒 Cambiar de usuario</button>
+  ${isAdmin ? '<button class="btndanger" id="mnuLogout">🔒 Cambiar de usuario</button>' : ''}
   </div>
   `;
   const close = showModal(body);
-  if(CURRENT_USER.type==="admin"){
-    body.querySelector("#mnuExport").onclick = () => { close(); exportExcel(); };
+  body.querySelector("#mnuExport").onclick = () => { close(); isAdmin ? exportExcel() : exportMyExcel(); };
+  if(isAdmin){
     body.querySelector("#mnuBackup").onclick = () => { close(); openBackupModal(); };
+    body.querySelector("#mnuLogout").onclick = () => { close(); confirmLogout(); };
   }
   body.querySelector("#mnuInstall").onclick = () => { close(); openInstallModal(); };
-  body.querySelector("#mnuLogout").onclick = () => { close(); confirmLogout(); };
 }
 
 function confirmLogout(){
@@ -350,14 +391,14 @@ function deleteManager(managerName){
     : `¿Eliminar al manager "${managerName}"? No tiene clientes cargados.`;
   if(!confirm(aviso)) return;
   if(count > 0 && !confirm(`Última confirmación: se van a borrar ${count} cliente${count===1?"":"s"} de "${managerName}" para siempre. ¿Continuar?`)) return;
-  STATE.managers = STATE.managers.filter(m => m !== managerName);
+  STATE.managers = STATE.managers.filter(m => m.name !== managerName);
   STATE.clients = STATE.clients.filter(c => c.manager !== managerName);
   openCards.delete(managerName);
   deleteManagerAndBadge(managerName);
   render();
 }
 
-function renderManagerCard(managerName, collapsible){
+function renderManagerCard(managerName, collapsible, token){
   const clients = STATE.clients.filter(c => c.manager === managerName);
   const card = document.createElement("div");
   card.className = "mgrcard" + (openCards.has(managerName) || !collapsible ? " open" : "");
@@ -367,8 +408,15 @@ const head = document.createElement("div");
   head.innerHTML = `
   <div class="donut" style="${donutStyle(clients)}"></div>
   <div class="info"><b>${managerName}</b><span>${clients.length} cliente${clients.length===1?"":"s"}</span></div>
+  ${token ? '<button class="miniBtn" data-x="link" title="Copiar link personal" style="margin-right:4px;">🔗</button>' : ''}
   ${collapsible ? '<div class="chev">▾</div>' : ''}
   `;
+  if(token){
+    head.querySelector('[data-x="link"]').onclick = (ev) => {
+      ev.stopPropagation();
+      copyManagerLink(token, managerName);
+    };
+  }
   if(collapsible){
     head.onclick = async () => {
       if(openCards.has(managerName)){
@@ -380,7 +428,7 @@ const head = document.createElement("div");
         // datos mas recientes del servidor (nunca una copia vieja
         // guardada en el dispositivo).
         const fresh = await loadShared();
-        if(fresh){
+        if(fresh && !fresh.error){
           STATE = fresh;
           if(!STATE.managers) STATE.managers = [];
           if(!STATE.clients) STATE.clients = [];
@@ -394,7 +442,12 @@ const head = document.createElement("div");
 const body = document.createElement("div");
   body.className = "mgrbody";
 
-const btnrow = document.createElement("div");
+// El botón de agregar/pegar con IA y de eliminar manager son SOLO
+// del administrador. Un manager que entra por su link personal solo
+// puede gestionar (estado, pago, observaciones) los clientes que Omar
+// ya le asignó — no puede agregar clientes nuevos ni borrar managers.
+if(CURRENT_USER.type === "admin"){
+  const btnrow = document.createElement("div");
   btnrow.className = "cardbtns";
   btnrow.innerHTML = `
   <button class="actionbtn primary" data-act="ai">🤖 Pegar y cargar con IA</button>
@@ -405,6 +458,7 @@ const btnrow = document.createElement("div");
   btnrow.querySelector('[data-act="manual"]').onclick = () => openClientForm(managerName, null);
   btnrow.querySelector('[data-act="delmgr"]').onclick = () => deleteManager(managerName);
   body.appendChild(btnrow);
+}
 
 const list = document.createElement("div");
   list.className = "clientlist";
@@ -421,17 +475,18 @@ const list = document.createElement("div");
 
 /* ===================== CLIENT CARD ===================== */
 function renderClientCard(c){
+  const isAdmin = CURRENT_USER.type === "admin";
   const el = document.createElement("div");
   el.className = "clientcard";
   const telHref = c.telefono ? `tel:${c.telefono.replace(/[^0-9+]/g,"")}` : "#";
   el.innerHTML = `
-  <div class="cname">${c.nombre}</div>
+  <div class="cname">${esc(c.nombre)}</div>
   <div class="cmeta">
-  ${c.telefono ? `📞 <a href="${telHref}">${c.telefono}</a><br>` : ""}
-  ${c.direccion ? `📍 ${c.direccion}<br>` : ""}
-  ${c.fechaCita ? `🗓️ ${c.fechaCita}<br>` : ""}
-  ${c.idioma ? `🗣️ Idioma: ${c.idioma}<br>` : ""}
-  ${c.notas ? `📝 ${c.notas}` : ""}
+  ${c.telefono ? `📞 <a href="${telHref}">${esc(c.telefono)}</a><br>` : ""}
+  ${c.direccion ? `📍 ${esc(c.direccion)}<br>` : ""}
+  ${c.fechaCita ? `🗓️ ${esc(c.fechaCita)}<br>` : ""}
+  ${c.idioma ? `🗣️ Idioma: ${esc(c.idioma)}<br>` : ""}
+  ${c.notas ? `📝 ${esc(c.notas)}` : ""}
   </div>
   ${c.revisar ? '<div class="revisarflag">⚠️ Revisar: estado heredado del sistema anterior</div>' : ""}
   `;
@@ -444,6 +499,9 @@ const srow = document.createElement("div");
     pill.textContent = e;
     if(c.estado===e) pill.style.background = ESTADO_COLOR[e];
     pill.onclick = () => {
+      // "Pagado" es especial: no se guarda directo, primero hay que
+      // llenar día, monto y forma de pago en una ventana obligatoria.
+      if(e === "Pagado"){ openPagoModal(c); return; }
       c.estado = e;
       c.revisar = false;
       saveClientAndBadge(c);
@@ -453,9 +511,20 @@ const srow = document.createElement("div");
   });
   el.appendChild(srow);
 
+// Resumen de los datos del pago, si ya se marcó como Pagado. El
+// botón de lápiz deja corregir un dato sin tener que desmarcar el
+// estado (por ejemplo, si se equivocaron en el monto).
+if(c.estado === "Pagado"){
+  const pagoInfo = document.createElement("div");
+  pagoInfo.innerHTML = `<span class="paydateset">💰 $${esc(String(c.pagoMonto||""))} · ${c.pagoFecha ? formatDate(c.pagoFecha) : "?"} · ${esc(c.pagoForma||"")}
+  <button data-x="editpago">✏️</button></span>`;
+  pagoInfo.querySelector('[data-x="editpago"]').onclick = () => openPagoModal(c);
+  el.appendChild(pagoInfo);
+}
+
 const payWrap = document.createElement("div");
   if(c.fechaPago){
-    payWrap.innerHTML = `<span class="paydateset">💰 Fecha de pago: ${formatDate(c.fechaPago)}
+    payWrap.innerHTML = `<span class="paydateset">📅 Fecha esperada de pago: ${formatDate(c.fechaPago)}
     <button data-x="clr">✕</button></span>`;
     payWrap.querySelector('[data-x="clr"]').onclick = () => {
       c.fechaPago = "";
@@ -465,13 +534,36 @@ const payWrap = document.createElement("div");
   } else {
     const b = document.createElement("button");
     b.className = "paydatebtn";
-    b.textContent = "📅 Fecha de pago";
+    b.textContent = "📅 Fecha esperada de pago";
     b.onclick = () => openPayDateModal(c);
     payWrap.appendChild(b);
   }
   el.appendChild(payWrap);
 
-const actions = document.createElement("div");
+// Observaciones: campo libre, siempre visible, disponible tanto para
+// el administrador como para el manager (no cuenta como "editar
+// cliente" — es parte del resultado de gestión).
+const obsWrap = document.createElement("div");
+  const obsBtn = document.createElement("button");
+  obsBtn.className = "miniBtn";
+  obsBtn.textContent = c.observaciones ? "📝 Observaciones ✓" : "📝 Observaciones";
+  obsBtn.onclick = () => openObservacionesModal(c);
+  obsWrap.appendChild(obsBtn);
+  obsWrap.style.marginTop = "8px";
+  el.appendChild(obsWrap);
+  if(c.observaciones){
+    const obsPreview = document.createElement("div");
+    obsPreview.className = "cmeta";
+    obsPreview.style.marginTop = "4px";
+    obsPreview.textContent = "📝 " + c.observaciones;
+    el.appendChild(obsPreview);
+  }
+
+// Editar y Eliminar son SOLO del administrador. Un manager puede
+// gestionar (estado, pago, observaciones) pero no puede cambiar los
+// datos base del cliente ni borrarlo.
+if(isAdmin){
+  const actions = document.createElement("div");
   actions.className = "cactions";
   const editBtn = document.createElement("button");
   editBtn.className = "miniBtn";
@@ -484,8 +576,88 @@ const actions = document.createElement("div");
   actions.appendChild(editBtn);
   actions.appendChild(delBtn);
   el.appendChild(actions);
+}
 
 return el;
+}
+
+/* ===================== VENTANA DE PAGADO (obligatoria) ===================== */
+function openPagoModal(c){
+  const body = document.createElement("div");
+  body.innerHTML = `
+  <h3>💰 Marcar como Pagado — ${esc(c.nombre)}</h3>
+  <p style="font-size:12.5px;color:var(--muted);">Estos 3 datos son obligatorios para poder guardar el pago.</p>
+  <label>Día del pago</label>
+  <input type="date" id="pgFecha" value="${esc(c.pagoFecha || todayStr())}">
+  <label>Monto pagado (USD)</label>
+  <input type="number" id="pgMonto" min="0" step="0.01" placeholder="ej. 150" value="${esc(String(c.pagoMonto||""))}">
+  <label>Forma de pago</label>
+  <select id="pgForma">
+  <option value="">Selecciona...</option>
+  <option value="A través de la compañía" ${c.pagoForma==="A través de la compañía"?"selected":""}>A través de la compañía</option>
+  <option value="Zelle" ${c.pagoForma==="Zelle"?"selected":""}>Zelle</option>
+  </select>
+  <div id="pgErr"></div>
+  <div class="modalbtns">
+  <button class="btncancel" id="pgCancel">Cancelar</button>
+  <button class="btnok" id="pgSave">Guardar pago</button>
+  </div>
+  `;
+  const close = showModal(body);
+  body.querySelector("#pgCancel").onclick = close;
+  body.querySelector("#pgSave").onclick = async () => {
+    const fecha = body.querySelector("#pgFecha").value;
+    const monto = body.querySelector("#pgMonto").value;
+    const forma = body.querySelector("#pgForma").value;
+    if(!fecha || !monto || Number(monto) <= 0 || !forma){
+      body.querySelector("#pgErr").innerHTML =
+        `<div class="dupewarn">⚠️ Completa día, monto y forma de pago para poder guardar.</div>`;
+      return;
+    }
+    const saveBtn = body.querySelector("#pgSave");
+    saveBtn.disabled = true;
+    saveBtn.textContent = "Guardando…";
+    c.estado = "Pagado";
+    c.pagoFecha = fecha;
+    c.pagoMonto = Number(monto);
+    c.pagoForma = forma;
+    c.revisar = false;
+    const res = await saveClientRemote(c);
+    if(!res.ok){
+      body.querySelector("#pgErr").innerHTML =
+        `<div class="dupewarn">⚠️ No se pudo guardar. Intenta de nuevo.</div>`;
+      saveBtn.disabled = false;
+      saveBtn.textContent = "Guardar pago";
+      return;
+    }
+    showBadge(true);
+    close(); render();
+  };
+}
+
+/* ===================== OBSERVACIONES (libre, siempre visible) ===================== */
+function openObservacionesModal(c){
+  const body = document.createElement("div");
+  body.innerHTML = `
+  <h3>📝 Observaciones — ${esc(c.nombre)}</h3>
+  <label>Texto libre</label>
+  <textarea id="obsText" rows="5">${esc(c.observaciones)}</textarea>
+  <div class="modalbtns">
+  <button class="btncancel" id="obsCancel">Cancelar</button>
+  <button class="btnok" id="obsSave">Guardar</button>
+  </div>
+  `;
+  const close = showModal(body);
+  body.querySelector("#obsCancel").onclick = close;
+  body.querySelector("#obsSave").onclick = async () => {
+    const saveBtn = body.querySelector("#obsSave");
+    saveBtn.disabled = true;
+    saveBtn.textContent = "Guardando…";
+    c.observaciones = body.querySelector("#obsText").value.trim();
+    const res = await saveClientRemote(c);
+    showBadge(res.ok);
+    close(); render();
+  };
 }
 function formatDate(iso){
   if(!iso) return "";
@@ -586,7 +758,7 @@ function openClientForm(managerName, existing){
       showBadge(res.ok);
       close(); render();
     } else {
-      const newClient = { manager: managerName, estado:"Pendiente", fechaPago:"", revisar:false, ...data };
+      const newClient = { manager: managerName, estado:"Pendiente", fechaPago:"", pagoFecha:"", pagoMonto:"", pagoForma:"", observaciones:"", revisar:false, ...data };
       const res = await saveClientRemote(newClient);
       showBadge(res.ok);
       if(res.ok && res.data && res.data.client){
@@ -635,7 +807,7 @@ function openAiPasteModal(managerName){
         const dupe = findDuplicate(p.nombre, p.telefono, null);
         if(dupe){ skipped.push(p.nombre); return; }
         toSave.push({
-          manager: managerName, estado:"Pendiente", fechaPago:"", revisar:false,
+          manager: managerName, estado:"Pendiente", fechaPago:"", pagoFecha:"", pagoMonto:"", pagoForma:"", observaciones:"", revisar:false,
           nombre: p.nombre || "", telefono: p.telefono || "", direccion: p.direccion || "",
           fechaCita: p.fechaCita || "", idioma: p.idioma || "", notas: p.notas || ""
         });
@@ -689,11 +861,10 @@ function renderAdminToolbar(){
   `;
   box.querySelector("#tbRefresh").onclick = async (e) => {
     const btn = e.currentTarget;
-    const original = btn.textContent;
     btn.textContent = "🔄 Actualizando…";
     btn.disabled = true;
     const fresh = await loadShared();
-    if(fresh){
+    if(fresh && !fresh.error){
       STATE = fresh;
       if(!STATE.managers) STATE.managers = [];
       if(!STATE.clients) STATE.clients = [];
@@ -704,6 +875,44 @@ function renderAdminToolbar(){
   box.querySelector("#tbExport").onclick = exportExcel;
   box.querySelector("#tbBackup").onclick = openBackupModal;
   return box;
+}
+
+/* ===================== TOOLBAR DEL MANAGER ===================== */
+function renderManagerToolbar(){
+  const box = document.createElement("div");
+  box.className = "toolbar";
+  box.innerHTML = `
+  <button class="toolbtn" id="tbRefresh">🔄 Actualizar ahora</button>
+  <button class="toolbtn" id="tbExport">⬇️ Exportar mi Excel</button>
+  `;
+  box.querySelector("#tbRefresh").onclick = async (e) => {
+    const btn = e.currentTarget;
+    btn.textContent = "🔄 Actualizando…";
+    btn.disabled = true;
+    const fresh = await loadShared(CURRENT_USER.token);
+    if(fresh && !fresh.error && fresh.role === "manager"){
+      STATE.clients = fresh.clients || [];
+    }
+    render();
+  };
+  box.querySelector("#tbExport").onclick = exportMyExcel;
+  return box;
+}
+
+// Copia al portapapeles el link personal de un manager, para que Omar
+// se lo mande por WhatsApp/mensaje directo. Con navegadores viejos o
+// sin permiso de portapapeles, muestra el link en una ventanita para
+// copiarlo a mano.
+function copyManagerLink(token, name){
+  const link = location.origin + "/?m=" + token;
+  if(navigator.clipboard && navigator.clipboard.writeText){
+    navigator.clipboard.writeText(link).then(
+      () => showToast("Link de " + name + " copiado ✓"),
+      () => window.prompt("Copia este link y envíaselo a " + name + ":", link)
+    );
+  } else {
+    window.prompt("Copia este link y envíaselo a " + name + ":", link);
+  }
 }
 
 function openAddManagerModal(){
@@ -719,12 +928,24 @@ function openAddManagerModal(){
   `;
   const close = showModal(body);
   body.querySelector("#amCancel").onclick = close;
-  body.querySelector("#amSave").onclick = () => {
+  body.querySelector("#amSave").onclick = async () => {
     const name = body.querySelector("#mgrName").value.trim();
     if(!name) return;
-    if(STATE.managers.includes(name)){ alert("Ese manager ya existe."); return; }
-    STATE.managers.push(name);
-    addManagerAndBadge(name);
+    if(STATE.managers.some(m => m.name === name)){ alert("Ese manager ya existe."); return; }
+    const saveBtn = body.querySelector("#amSave");
+    saveBtn.disabled = true;
+    saveBtn.textContent = "Agregando…";
+    const ok = await addManagerRemote(name);
+    // Volvemos a pedir todo al servidor: asi conseguimos el codigo
+    // secreto (link) que el servidor acaba de generar para este
+    // manager nuevo, en vez de adivinarlo en la pantalla.
+    const fresh = ok ? await loadShared() : null;
+    if(fresh && !fresh.error){
+      STATE = fresh;
+      if(!STATE.managers) STATE.managers = [];
+      if(!STATE.clients) STATE.clients = [];
+    }
+    showBadge(!!ok);
     close(); render();
   };
 }
@@ -797,22 +1018,30 @@ function openInstallModal(){
 }
 
 /* ===================== EXCEL EXPORT ===================== */
-function exportExcel(){
-  const wb = XLSX.utils.book_new();
-  const headers = ["#","Manager","Nombre","Teléfono","Dirección","Fecha Cita","Idioma","Notas","Estado","Fecha de pago"];
+const EXCEL_HEADERS = ["#","Manager","Nombre","Teléfono","Dirección","Fecha Cita","Idioma","Notas","Estado",
+  "Fecha esperada de pago","Día de pago","Monto pagado","Forma de pago","Observaciones"];
 
-function sheetFor(clients){
-  const rows = [headers];
-  clients.forEach((c,i) => rows.push([i+1, c.manager, c.nombre, c.telefono, c.direccion, c.fechaCita, c.idioma, c.notas, c.estado, c.fechaPago ? formatDate(c.fechaPago) : ""]));
+function buildClientSheet(clients){
+  const rows = [EXCEL_HEADERS];
+  clients.forEach((c,i) => rows.push([
+    i+1, c.manager, c.nombre, c.telefono, c.direccion, c.fechaCita, c.idioma, c.notas, c.estado,
+    c.fechaPago ? formatDate(c.fechaPago) : "",
+    c.pagoFecha ? formatDate(c.pagoFecha) : "",
+    c.pagoMonto || "",
+    c.pagoForma || "",
+    c.observaciones || ""
+  ]));
   return XLSX.utils.aoa_to_sheet(rows);
 }
 
-XLSX.utils.book_append_sheet(wb, sheetFor(STATE.clients), "Todos los clientes");
+function exportExcel(){
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, buildClientSheet(STATE.clients), "Todos los clientes");
 
 const resumenRows = [["Manager", ...ESTADOS, "Total"]];
   STATE.managers.forEach(m => {
-    const clients = STATE.clients.filter(c=>c.manager===m);
-    const row = [m];
+    const clients = STATE.clients.filter(c=>c.manager===m.name);
+    const row = [m.name];
     ESTADOS.forEach(e => row.push(clients.filter(c=>c.estado===e).length));
     row.push(clients.length);
     resumenRows.push(row);
@@ -820,13 +1049,24 @@ const resumenRows = [["Manager", ...ESTADOS, "Total"]];
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(resumenRows), "Resumen");
 
 STATE.managers.forEach(m => {
-  const clients = STATE.clients.filter(c=>c.manager===m);
-  const safe = m.slice(0,31);
-  XLSX.utils.book_append_sheet(wb, sheetFor(clients), safe);
+  const clients = STATE.clients.filter(c=>c.manager===m.name);
+  const safe = m.name.slice(0,31);
+  XLSX.utils.book_append_sheet(wb, buildClientSheet(clients), safe);
 });
 
 const stamp = todayStr();
   XLSX.writeFile(wb, `managers_${stamp}.xlsx`);
+}
+
+// Export para un manager individual: solo sus propios clientes, con
+// las mismas columnas (incluyendo pago y observaciones).
+function exportMyExcel(){
+  const wb = XLSX.utils.book_new();
+  const safeSheet = (CURRENT_USER.name || "Mis clientes").slice(0,31);
+  XLSX.utils.book_append_sheet(wb, buildClientSheet(STATE.clients), safeSheet);
+  const stamp = todayStr();
+  const safeName = (CURRENT_USER.name || "manager").replace(/[^a-z0-9]+/gi, "_");
+  XLSX.writeFile(wb, `${safeName}_${stamp}.xlsx`);
 }
 
 /* ===================== AUTO-REFRESH AL VOLVER A LA APP =====================
@@ -839,8 +1079,16 @@ document.addEventListener("visibilitychange", async () => {
   if(document.visibilityState !== "visible") return;
   if(!CURRENT_USER) return;
   if(document.querySelector(".overlay")) return; // hay un modal abierto, no interrumpir
+  if(CURRENT_USER.type === "manager"){
+    const fresh = await loadShared(CURRENT_USER.token);
+    if(fresh && !fresh.error && fresh.role === "manager"){
+      STATE.clients = fresh.clients || [];
+      render();
+    }
+    return;
+  }
   const fresh = await loadShared();
-  if(fresh){
+  if(fresh && !fresh.error){
     STATE = fresh;
     if(!STATE.managers) STATE.managers = [];
     if(!STATE.clients) STATE.clients = [];
