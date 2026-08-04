@@ -97,6 +97,23 @@ await s.setJSON("managers", managers);
 }
 }
 
+// Genera un codigo secreto NUEVO para un manager que ya existe. El
+// link viejo (con el codigo anterior) deja de servir en el momento,
+// aunque el manager y sus clientes no se tocan para nada. Sirve para
+// "cortarle el acceso" a un link que se perdio o se compartio de mas,
+// sin tener que borrar al manager ni sus clientes.
+export async function regenerateManagerToken(name: string): Promise<ManagerRecord | null> {
+await ensureMigrated();
+await ensureManagerTokens();
+const s = store();
+const managers = await getManagers();
+const idx = managers.findIndex((m) => m.name === name);
+if (idx === -1) return null;
+managers[idx] = { name: managers[idx].name, token: genToken() };
+await s.setJSON("managers", managers);
+return managers[idx];
+}
+
 // Busca a que manager le pertenece un codigo secreto (link). Si no
 // existe ningun manager con ese codigo, devuelve null (link invalido).
 export async function findManagerByToken(token: string): Promise<ManagerRecord | null> {

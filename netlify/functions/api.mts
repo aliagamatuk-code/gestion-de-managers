@@ -10,6 +10,7 @@ addManagerIfMissing,
 deleteManagerAndClients,
 findDuplicate,
 findManagerByToken,
+regenerateManagerToken,
 newId,
 } from "./_store-helpers.mts";
 
@@ -181,6 +182,13 @@ const body = await req.json();
 if (body.token) return json({ error: "forbidden" }, 403);
 const name = (body.name || "").toString().trim();
 if (!name) return json({ error: "missing_name" }, 400);
+// Generar un link nuevo para un manager que ya existe: invalida el
+// link viejo al instante, sin borrar al manager ni sus clientes.
+if (body.regenerateToken) {
+const mgr = await regenerateManagerToken(name);
+if (!mgr) return json({ error: "not_found" }, 404);
+return json({ ok: true, manager: mgr });
+}
 await addManagerIfMissing(name);
 return json({ ok: true });
 }
