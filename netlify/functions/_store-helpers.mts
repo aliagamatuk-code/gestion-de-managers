@@ -41,8 +41,45 @@ await s.setJSON("client:" + c.id, c);
 await s.set(MIGRATION_KEY, "1");
 }
 
-export async function getManagers(): Promise<string[]> {
+// Genera un codigo secreto para el link personal de un manager.
+// No es adivinable: son 20 caracteres al azar (letras y numeros).
+export function genToken(): string {
+const raw = (globalThis as any).crypto?.randomUUID?.() || String(Date.now()) + Math.random();
+return raw.toString().replace(/-/g, "").slice(0, 20);
+}
+
+const MIGRATION_KEY_TOKENS = "migrated-to-v3-manager-tokens";
+
+// Convierte la lista de managers, que antes eran solo texto
+// (["Carlos Rosario", ...]), a objetos con su propio codigo secreto
+// (link personal): [{name:"Carlos Rosario", token:"..."}, ...].
+// Igual que la otra migracion, corre UNA sola vez.
+export async function ensureManagerTokens() {
+const s = store();
+const already = await s.get(MIGRATION_KEY_TOKENS);
+if (already) return;
+
+const raw: any = await s.get("managers", { type: "json" });
+const list = Array.isArray(raw) ? raw : [];
+const upgraded = list
+.map((m: any) => {
+if (typeof m === "string") return { name: m, token: genToken() };
+if (m && typeof m === "object" && m.name) {
+return { name: m.name, token: m.token || genToken() };
+}
+return null;
+})
+.filter(Boolean);
+
+await s.setJSON("managers", upgraded);
+await s.set(MIGRATION_KEY_TOKENS, "1");
+}
+
+export type ManagerRecord = { name: string; token: string };
+
+export async function getManagers(): Promise<ManagerRecord[]> {
 await ensureMigrated();
+await ensureManagerTokens();
 const s = store();
 const managers = await s.get("managers", { type: "json" });
 return Array.isArray(managers) ? managers : [];
@@ -50,20 +87,30 @@ return Array.isArray(managers) ? managers : [];
 
 export async function addManagerIfMissing(name: string) {
 await ensureMigrated();
+await ensureManagerTokens();
 const s = store();
 const managers = await getManagers();
-const exists = managers.some((m: string) => normName(m) === normName(name));
+const exists = managers.some((m) => normName(m.name) === normName(name));
 if (!exists && name) {
-managers.push(name);
+managers.push({ name, token: genToken() });
 await s.setJSON("managers", managers);
 }
 }
 
+// Busca a que manager le pertenece un codigo secreto (link). Si no
+// existe ningun manager con ese codigo, devuelve null (link invalido).
+export async function findManagerByToken(token: string): Promise<ManagerRecord | null> {
+if (!token) return null;
+const managers = await getManagers();
+return managers.find((m) => m.token === token) || null;
+}
+
 export async function deleteManagerAndClients(name: string) {
 await ensureMigrated();
+await ensureManagerTokens();
 const s = store();
 const managers = await getManagers();
-const filtered = managers.filter((m: string) => m !== name);
+const filtered = managers.filter((m) => m.name !== name);
 await s.setJSON("managers", filtered);
 const clients = await getAllClients();
 const toDelete = clients.filter((c: any) => c.manager === name);

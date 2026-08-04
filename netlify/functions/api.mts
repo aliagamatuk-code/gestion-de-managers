@@ -9,8 +9,30 @@ deleteClient,
 addManagerIfMissing,
 deleteManagerAndClients,
 findDuplicate,
+findManagerByToken,
 newId,
 } from "./_store-helpers.mts";
+
+// Campos de "resultados de gestion" que un manager SI puede tocar en
+// un cliente que ya es suyo (via su link personal). Todo lo demas
+// (nombre, telefono, direccion, etc.) esta bloqueado para managers:
+// solo el administrador lo puede cambiar.
+const MANAGER_ALLOWED_FIELDS = [
+"estado",
+"pagoFecha",
+"pagoMonto",
+"pagoForma",
+"observaciones",
+];
+
+// Si el estado que se va a guardar es "Pagado", exige dia, monto y
+// forma de pago completos. Se revisa siempre en el servidor (no solo
+// en la pantalla) para que nunca se pueda guardar un pago incompleto,
+// ni siquiera saltandose la app.
+function pagoIncompleto(client: any) {
+if (client.estado !== "Pagado") return false;
+return !client.pagoFecha || !client.pagoMonto || !client.pagoForma;
+}
 
 const MAX_BACKUPS = 30;
 
@@ -40,9 +62,23 @@ const method = req.method;
 try {
 if (path === "/api/data") {
 if (method === "GET") {
+// Si viene un "token" en el link (ej. /?m=abc123), esta pidiendo
+// los datos SOLO de ese manager. Si el codigo no existe, el link
+// ya no sirve (por ejemplo, si Omar borro a ese manager).
+const token = url.searchParams.get("token") || "";
+if (token) {
+const mgr = await findManagerByToken(token);
+if (!mgr) return json({ error: "invalid_token" }, 401);
+const allClients = await getAllClients();
+const clients = allClients.filter((c: any) => c.manager === mgr.name);
+return json({ role: "manager", managerName: mgr.name, clients });
+}
+// Sin token = entrada del administrador (como funcionaba antes).
+// Ve a todos los managers (con su codigo de link, para poder
+// copiarlo y enviarlo) y a todos los clientes.
 const managers = await getManagers();
 const clients = await getAllClients();
-return json({ managers, clients });
+return json({ role: "admin", managers, clients });
 }
 // Ya no se usa POST /api/data para guardar cambios sueltos (eso
 // ahora pasa por /api/client y /api/manager, uno por uno, para
@@ -56,6 +92,33 @@ return json({ error: "use_client_or_manager_endpoints" }, 400);
 if (path === "/api/client") {
 if (method === "POST") {
 const body = await req.json();
+const token = (body.token || "").toString().trim();
+
+// ---- Un manager esta guardando desde SU link personal ----
+// Solo puede actualizar el resultado de gestion (estado, datos
+// de pago, observaciones) de un cliente que YA es suyo. No puede
+// crear clientes nuevos ni cambiar el nombre/telefono/etc, y no
+// puede tocar clientes de otro manager.
+if (token) {
+const mgr = await findManagerByToken(token);
+if (!mgr) return json({ error: "invalid_token" }, 401);
+if (!body.id) return json({ error: "managers_cannot_create" }, 403);
+const existing = await getClient(body.id);
+if (!existing || existing.manager !== mgr.name) {
+return json({ error: "not_found" }, 404);
+}
+const client = { ...existing };
+for (const field of MANAGER_ALLOWED_FIELDS) {
+if (field in body) client[field] = body[field];
+}
+if (pagoIncompleto(client)) {
+return json({ error: "pago_incompleto" }, 400);
+}
+await saveClient(client);
+return json({ ok: true, client });
+}
+
+// ---- Flujo normal del administrador (como ya funcionaba) ----
 const nombre = (body.nombre || "").toString().trim();
 if (!nombre) return json({ error: "missing_nombre" }, 400);
 const manager = (body.manager || "").toString().trim();
@@ -85,14 +148,25 @@ idioma: (body.idioma || "").toString().trim(),
 notas: (body.notas || "").toString().trim(),
 estado: body.estado || "Pendiente",
 fechaPago: body.fechaPago || "",
+pagoFecha: body.pagoFecha || "",
+pagoMonto: body.pagoMonto || "",
+pagoForma: body.pagoForma || "",
+observaciones: body.observaciones || "",
 revisar: !!body.revisar,
 };
+}
+if (pagoIncompleto(client)) {
+return json({ error: "pago_incompleto" }, 400);
 }
 await addManagerIfMissing(client.manager);
 await saveClient(client);
 return json({ ok: true, client });
 }
 if (method === "DELETE") {
+// Un manager, aunque mande su link, JAMAS puede borrar un cliente.
+// Borrar solo lo puede hacer el administrador (sin token).
+const token = url.searchParams.get("token") || "";
+if (token) return json({ error: "forbidden" }, 403);
 const id = url.searchParams.get("id") || "";
 if (!id) return json({ error: "missing_id" }, 400);
 await deleteClient(id);
@@ -101,14 +175,17 @@ return json({ ok: true });
 }
 
 if (path === "/api/manager") {
+// Agregar o eliminar managers es solo del administrador.
 if (method === "POST") {
 const body = await req.json();
+if (body.token) return json({ error: "forbidden" }, 403);
 const name = (body.name || "").toString().trim();
 if (!name) return json({ error: "missing_name" }, 400);
 await addManagerIfMissing(name);
 return json({ ok: true });
 }
 if (method === "DELETE") {
+if (url.searchParams.get("token")) return json({ error: "forbidden" }, 403);
 const name = url.searchParams.get("name") || "";
 if (!name) return json({ error: "missing_name" }, 400);
 const removedCount = await deleteManagerAndClients(name);
@@ -118,12 +195,14 @@ return json({ ok: true, removedCount });
 
 if (path === "/api/backups") {
 const s = store();
+if (url.searchParams.get("token")) return json({ error: "forbidden" }, 403);
 if (method === "GET") {
 const idx = (await s.get("backup-index", { type: "json" })) || [];
 return json(idx);
 }
 if (method === "POST") {
 const body = await req.json().catch(() => ({}));
+if (body.token) return json({ error: "forbidden" }, 403);
 const managers = await getManagers();
 const clients = await getAllClients();
 const state = { managers, clients };
@@ -148,7 +227,8 @@ return json({ ok: true, id });
 
 if (path === "/api/backups/restore" && method === "POST") {
 const s = store();
-const { id } = await req.json();
+const { id, token } = await req.json();
+if (token) return json({ error: "forbidden" }, 403);
 if (!id) return json({ error: "missing_id" }, 400);
 const backupData: any = await s.get(id, { type: "json" });
 if (!backupData) return json({ error: "not_found" }, 404);

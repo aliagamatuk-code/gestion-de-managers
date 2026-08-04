@@ -133,6 +133,10 @@ idioma,
 notas,
 estado: "Activo",
 fechaPago: "",
+pagoFecha: "",
+pagoMonto: "",
+pagoForma: "",
+observaciones: "",
 revisar: false,
 };
 
