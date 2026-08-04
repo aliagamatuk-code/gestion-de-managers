@@ -21,7 +21,14 @@ return getStore("gestion-managers");
 function json(body: any, status = 200) {
 return new Response(JSON.stringify(body), {
 status,
-headers: { "content-type": "application/json" },
+headers: {
+"content-type": "application/json",
+// Nunca dejar que el navegador (ni ningun proxy/CDN de por medio)
+// guarde en cache esta respuesta. Sin esto, algunos navegadores
+// (sobre todo en celular) pueden mostrar datos viejos aunque el
+// servidor ya tenga los datos nuevos guardados.
+"cache-control": "no-store, no-cache, must-revalidate, max-age=0",
+},
 });
 }
 

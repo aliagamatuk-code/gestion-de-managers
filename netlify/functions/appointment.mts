@@ -10,7 +10,10 @@ newId,
 function json(body: any, status = 200) {
 return new Response(JSON.stringify(body), {
 status,
-headers: { "content-type": "application/json" },
+headers: {
+"content-type": "application/json",
+"cache-control": "no-store, no-cache, must-revalidate, max-age=0",
+},
 });
 }
 
