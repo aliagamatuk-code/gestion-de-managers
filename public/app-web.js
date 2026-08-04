@@ -38,14 +38,30 @@ function loadManagerToken(){ try{ return localStorage.getItem(MGR_TOKEN_KEY) || 
 // manager), en vez de reescribir toda la lista junta. Asi, si Omar y
 // una cita nueva por Webhook guardan casi al mismo tiempo, nunca se
 // borran entre si.
-async function saveClientRemote(client){
+async function saveClientRemote(client, fields){
   try{
+    // Si "fields" viene con una lista de nombres de campo (ej.
+    // ['estado','revisar']), solo mandamos esos campos + el id, en vez
+    // de la ficha completa del cliente. Esto evita que, si alguien
+    // tiene la pantalla abierta desde hace rato (por ejemplo un
+    // manager y su secretaria compartiendo el mismo link), un guardado
+    // "viejo" borre por accidente un cambio mas reciente que hizo otra
+    // persona en un campo distinto. Si no se pasa "fields", se manda
+    // la ficha completa (se usa para crear o editar un cliente entero,
+    // algo que solo hace el administrador).
+    let base;
+    if(fields){
+      base = { id: client.id };
+      fields.forEach(f => { base[f] = client[f]; });
+    } else {
+      base = { ...client };
+    }
     // Si quien guarda es un manager (entro por su link personal), le
     // mandamos al servidor su codigo secreto junto con el cambio. El
     // servidor usa ese codigo para saber quien es y que SI puede tocar.
     const payload = (CURRENT_USER && CURRENT_USER.type === "manager")
-      ? { ...client, token: CURRENT_USER.token }
-      : client;
+      ? { ...base, token: CURRENT_USER.token }
+      : base;
     const r = await fetch('/api/client', {
       method:'POST',
       headers:{'content-type':'application/json'},
@@ -132,8 +148,8 @@ async function restoreBackup(id){
 }
 
 /* ===================== AVISO DE GUARDADO ===================== */
-function saveClientAndBadge(client){
-  saveClientRemote(client).then(res => showBadge(res.ok));
+function saveClientAndBadge(client, fields){
+  saveClientRemote(client, fields).then(res => showBadge(res.ok));
 }
 function deleteClientAndBadge(id){
   deleteClientRemote(id).then(ok => showBadge(ok));
@@ -509,7 +525,7 @@ const srow = document.createElement("div");
       if(e === "Pagado"){ openPagoModal(c); return; }
       c.estado = e;
       c.revisar = false;
-      saveClientAndBadge(c);
+      saveClientAndBadge(c, ['estado','revisar']);
       render();
     };
     srow.appendChild(pill);
@@ -533,7 +549,7 @@ const payWrap = document.createElement("div");
     <button data-x="clr">✕</button></span>`;
     payWrap.querySelector('[data-x="clr"]').onclick = () => {
       c.fechaPago = "";
-      saveClientAndBadge(c);
+      saveClientAndBadge(c, ['fechaPago']);
       render();
     };
   } else {
@@ -627,7 +643,7 @@ function openPagoModal(c){
     c.pagoMonto = Number(monto);
     c.pagoForma = forma;
     c.revisar = false;
-    const res = await saveClientRemote(c);
+    const res = await saveClientRemote(c, ['estado','pagoFecha','pagoMonto','pagoForma','revisar']);
     if(!res.ok){
       body.querySelector("#pgErr").innerHTML =
         `<div class="dupewarn">⚠️ No se pudo guardar. Intenta de nuevo.</div>`;
@@ -659,7 +675,7 @@ function openObservacionesModal(c){
     saveBtn.disabled = true;
     saveBtn.textContent = "Guardando…";
     c.observaciones = body.querySelector("#obsText").value.trim();
-    const res = await saveClientRemote(c);
+    const res = await saveClientRemote(c, ['observaciones']);
     showBadge(res.ok);
     close(); render();
   };
@@ -685,7 +701,7 @@ function openPayDateModal(c){
   body.querySelector("#payCancel").onclick = close;
   body.querySelector("#paySave").onclick = () => {
     const v = body.querySelector("#payInput").value;
-    if(v){ c.fechaPago = v; saveClientAndBadge(c); }
+    if(v){ c.fechaPago = v; saveClientAndBadge(c, ['fechaPago']); }
     close(); render();
   };
 }
