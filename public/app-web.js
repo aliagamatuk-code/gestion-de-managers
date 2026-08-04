@@ -17,7 +17,9 @@ let openCards = new Set();
 /* ===================== STORAGE HELPERS (real backend via /api) ===================== */
 async function loadShared(){
   try{
-    const r = await fetch('/api/data');
+    // cache:'no-store' obliga al navegador a pedir SIEMPRE los datos
+    // reales al servidor, nunca una copia guardada en el celular/PC.
+    const r = await fetch('/api/data', { cache: 'no-store' });
     if(!r.ok) return null;
     return await r.json();
   }catch(e){ return null; }
@@ -368,10 +370,23 @@ const head = document.createElement("div");
   ${collapsible ? '<div class="chev">▾</div>' : ''}
   `;
   if(collapsible){
-    head.onclick = () => {
-      if(openCards.has(managerName)) openCards.delete(managerName);
-      else openCards.add(managerName);
-      render();
+    head.onclick = async () => {
+      if(openCards.has(managerName)){
+        openCards.delete(managerName);
+        render();
+      } else {
+        openCards.add(managerName);
+        // Antes de mostrar la lista de este manager, traemos los
+        // datos mas recientes del servidor (nunca una copia vieja
+        // guardada en el dispositivo).
+        const fresh = await loadShared();
+        if(fresh){
+          STATE = fresh;
+          if(!STATE.managers) STATE.managers = [];
+          if(!STATE.clients) STATE.clients = [];
+        }
+        render();
+      }
     };
   }
   card.appendChild(head);
@@ -667,10 +682,24 @@ function renderAdminToolbar(){
   const box = document.createElement("div");
   box.className = "toolbar";
   box.innerHTML = `
+  <button class="toolbtn" id="tbRefresh">🔄 Actualizar ahora</button>
   <button class="toolbtn" id="tbAddMgr">➕ Agregar manager</button>
   <button class="toolbtn" id="tbExport">⬇️ Exportar Excel</button>
   <button class="toolbtn" id="tbBackup">🗄️ Respaldos</button>
   `;
+  box.querySelector("#tbRefresh").onclick = async (e) => {
+    const btn = e.currentTarget;
+    const original = btn.textContent;
+    btn.textContent = "🔄 Actualizando…";
+    btn.disabled = true;
+    const fresh = await loadShared();
+    if(fresh){
+      STATE = fresh;
+      if(!STATE.managers) STATE.managers = [];
+      if(!STATE.clients) STATE.clients = [];
+    }
+    render();
+  };
   box.querySelector("#tbAddMgr").onclick = openAddManagerModal;
   box.querySelector("#tbExport").onclick = exportExcel;
   box.querySelector("#tbBackup").onclick = openBackupModal;
@@ -799,6 +828,25 @@ STATE.managers.forEach(m => {
 const stamp = todayStr();
   XLSX.writeFile(wb, `managers_${stamp}.xlsx`);
 }
+
+/* ===================== AUTO-REFRESH AL VOLVER A LA APP =====================
+   Si Omar (o un manager) deja la app en segundo plano y vuelve
+   despues, esto trae los datos mas recientes automaticamente, sin
+   tener que cerrar y volver a abrir la pagina. Si hay un formulario
+   o modal abierto en ese momento, no se toca nada para no perder lo
+   que se estaba escribiendo. */
+document.addEventListener("visibilitychange", async () => {
+  if(document.visibilityState !== "visible") return;
+  if(!CURRENT_USER) return;
+  if(document.querySelector(".overlay")) return; // hay un modal abierto, no interrumpir
+  const fresh = await loadShared();
+  if(fresh){
+    STATE = fresh;
+    if(!STATE.managers) STATE.managers = [];
+    if(!STATE.clients) STATE.clients = [];
+    render();
+  }
+});
 
 /* ===================== START ===================== */
 init();
