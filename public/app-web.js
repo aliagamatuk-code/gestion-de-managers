@@ -409,12 +409,17 @@ const head = document.createElement("div");
   <div class="donut" style="${donutStyle(clients)}"></div>
   <div class="info"><b>${managerName}</b><span>${clients.length} cliente${clients.length===1?"":"s"}</span></div>
   ${token ? '<button class="miniBtn" data-x="link" title="Copiar link personal" style="margin-right:4px;">🔗</button>' : ''}
+  ${token ? '<button class="miniBtn" data-x="revoke" title="Generar link nuevo (corta el acceso al anterior)" style="margin-right:4px;">🔁</button>' : ''}
   ${collapsible ? '<div class="chev">▾</div>' : ''}
   `;
   if(token){
     head.querySelector('[data-x="link"]').onclick = (ev) => {
       ev.stopPropagation();
       copyManagerLink(token, managerName);
+    };
+    head.querySelector('[data-x="revoke"]').onclick = (ev) => {
+      ev.stopPropagation();
+      regenerateManagerLink(managerName);
     };
   }
   if(collapsible){
@@ -912,6 +917,38 @@ function copyManagerLink(token, name){
     );
   } else {
     window.prompt("Copia este link y envíaselo a " + name + ":", link);
+  }
+}
+
+// Corta el acceso al link viejo de un manager y genera uno nuevo. El
+// manager y sus clientes NO se tocan — solo cambia el codigo secreto.
+// Si esa persona tenia el link guardado, va a dejar de funcionarle de
+// inmediato y va a necesitar que le mandes el link nuevo.
+async function regenerateManagerLink(name){
+  const ok = confirm(
+    `¿Generar un link nuevo para "${name}"?\n\nEl link anterior deja de funcionar AL INSTANTE. Si ${name} ya lo tenía guardado en su celular, no va a poder entrar hasta que le mandes el link nuevo.`
+  );
+  if(!ok) return;
+  try{
+    const r = await fetch('/api/manager', {
+      method:'POST',
+      headers:{'content-type':'application/json'},
+      body: JSON.stringify({name, regenerateToken:true})
+    });
+    const data = await r.json().catch(()=>({}));
+    if(!r.ok || !data.ok){ showToast("No se pudo generar el link nuevo", true); return; }
+    const fresh = await loadShared();
+    if(fresh && !fresh.error){
+      STATE = fresh;
+      if(!STATE.managers) STATE.managers = [];
+      if(!STATE.clients) STATE.clients = [];
+    }
+    render();
+    if(data.manager && data.manager.token){
+      copyManagerLink(data.manager.token, name);
+    }
+  }catch(e){
+    showToast("No se pudo generar el link nuevo", true);
   }
 }
 
