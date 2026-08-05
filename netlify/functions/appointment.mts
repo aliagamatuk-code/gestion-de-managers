@@ -1,10 +1,12 @@
 import type { Context, Config } from "@netlify/functions";
 import {
 getAllClients,
+getManagers,
 saveClient,
 addManagerIfMissing,
 findDuplicate,
 newId,
+normName,
 } from "./_store-helpers.mts";
 
 function json(body: any, status = 200) {
@@ -66,7 +68,25 @@ const calendarIdRaw =
 (body.calendar && body.calendar.id) || customData.calendarId || "";
 const calendarId = calendarIdFromUrl(calendarIdRaw.toString().trim());
 const managerDirecto = (customData.manager || "").toString().trim();
-const manager = managerDirecto || (await managerFromCalendarId(calendarId));
+let manager = managerDirecto || (await managerFromCalendarId(calendarId));
+
+// BLINDAJE CONTRA TILDES: el nombre del manager puede llegar escrito
+// un poco distinto al que ya esta guardado (ej. "Angel Cadenas" sin
+// tilde, en vez de "Ángel Cadenas"). Si eso pasa y no lo corregimos,
+// el cliente se guarda igual, pero queda "invisible" en el link
+// personal de ese manager (porque el link compara el nombre exacto).
+// Aqui buscamos si el nombre que llego coincide, ignorando tildes y
+// mayusculas, con un manager que YA existe, y si es asi usamos el
+// nombre EXACTO que ya esta guardado, para que el cliente quede
+// visible desde el primer momento.
+if (manager) {
+  const existingManagers = await getManagers();
+  const matched = existingManagers.find(
+    (m) => normName(m.name) === normName(manager)
+  );
+  if (matched) manager = matched.name;
+}
+
 const nombre = (customData.nombre || body.full_name || "").toString().trim();
 const telefono = (customData.telefono || body.phone || "").toString().trim();
 const direccion = (customData.direccion || body.full_address || "").toString().trim();
