@@ -21,8 +21,6 @@ headers: {
 
 const LAUNCHER_API = "https://calendarios-managers-quantica360.netlify.app/api/managers";
 
-// Saca el calendarId final de un link de booking, ej:
-// https://api.leadconnectorhq.com/widget/booking/54Gonho9iMIzHsEoZCYF -> 54Gonho9iMIzHsEoZCYF
 function calendarIdFromUrl(u: string): string {
 if (!u) return "";
 const parts = u.split("/").filter(Boolean);
@@ -70,21 +68,12 @@ const calendarId = calendarIdFromUrl(calendarIdRaw.toString().trim());
 const managerDirecto = (customData.manager || "").toString().trim();
 let manager = managerDirecto || (await managerFromCalendarId(calendarId));
 
-// BLINDAJE CONTRA TILDES: el nombre del manager puede llegar escrito
-// un poco distinto al que ya esta guardado (ej. "Angel Cadenas" sin
-// tilde, en vez de "Ángel Cadenas"). Si eso pasa y no lo corregimos,
-// el cliente se guarda igual, pero queda "invisible" en el link
-// personal de ese manager (porque el link compara el nombre exacto).
-// Aqui buscamos si el nombre que llego coincide, ignorando tildes y
-// mayusculas, con un manager que YA existe, y si es asi usamos el
-// nombre EXACTO que ya esta guardado, para que el cliente quede
-// visible desde el primer momento.
 if (manager) {
-  const existingManagers = await getManagers();
-  const matched = existingManagers.find(
-    (m) => normName(m.name) === normName(manager)
-  );
-  if (matched) manager = matched.name;
+const existingManagers = await getManagers();
+const matched = existingManagers.find(
+(m) => normName(m.name) === normName(manager)
+);
+if (matched) manager = matched.name;
 }
 
 const nombre = (customData.nombre || body.full_name || "").toString().trim();
@@ -114,10 +103,6 @@ cuerpoCompletoRecibido: JSON.stringify(body),
 );
 }
 
-// AVISO DE SEGURIDAD (blindaje): si idioma o fechaCita llegan vacios,
-// lo anotamos en los registros de la funcion (Netlify > Logs) para
-// detectar rapido si algo cambio en GHL (el trigger, el mapeo de
-// customData, etc.) y esto se rompio de nuevo.
 if (!idioma || !fechaCita) {
 console.warn(
 "AVISO: llego una reserva con datos incompletos.",
@@ -129,13 +114,8 @@ fechaCita_vacia: !fechaCita,
 );
 }
 
-// Nos aseguramos de que el manager quede registrado (si ya existe, no
-// hace nada). Esto es de muy bajo riesgo porque casi nunca escribe:
-// solo escribe cuando aparece un manager que todavia no esta en la lista.
 await addManagerIfMissing(manager);
 
-// Revisamos si ya existe un cliente igual (mismo nombre + telefono).
-// Esto es solo LECTURA, asi que nunca puede chocar con otro guardado.
 const existingClients = await getAllClients();
 const dupe = findDuplicate(existingClients, nombre, telefono, null);
 if (dupe) {
@@ -158,11 +138,9 @@ pagoMonto: "",
 pagoForma: "",
 observaciones: "",
 revisar: false,
+calendarId,
 };
 
-// Este guardado escribe SOLO la llave de este cliente nuevo. No toca
-// ninguna otra llave, asi que no puede borrar cambios que otra persona
-// (o otra cita) haya guardado al mismo tiempo.
 await saveClient(client);
 
 return json({ ok: true, created: true, duplicate: false, clientId: client.id });
