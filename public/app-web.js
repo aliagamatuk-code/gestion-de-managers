@@ -8,6 +8,15 @@ const ESTADO_COLOR = {
   "Vendido pendiente de pago":"var(--st-vendidopend)",
   "Pagado":"var(--st-pagado)"
 };
+// Calendarios "compartidos" (reciben citas de clientes de distintas
+// zonas). Solo en clientes que vinieron de uno de estos calendarios
+// se puede usar el boton de "Cambiar de manager" - en los demas
+// clientes no aplica, porque su manager ya quedo bien asignado desde
+// el principio.
+const CALENDARIOS_REASIGNABLES = [
+    "38mQym1YLkX4RdLT0Gmc", // Water Quality Assessment
+    "A5AyPCIXAZoOQsBnBj3K", // Water Quality Assessment RP
+  ];
 const LOCK_KEY = "gestion-managers-device-lock";
 // Guarda el codigo secreto del link personal de un manager en este
 // dispositivo, para que no tenga que volver a tocar el link cada vez
@@ -596,6 +605,16 @@ if(isAdmin){
   delBtn.onclick = () => confirmDeleteClient(c);
   actions.appendChild(editBtn);
   actions.appendChild(delBtn);
+  // El boton de "Cambiar de manager" solo aparece si este cliente vino
+    // de uno de los calendarios compartidos (Water Quality Assessment o
+    // su version RP). En los demas clientes no se muestra.
+    if(c.calendarId && CALENDARIOS_REASIGNABLES.includes(c.calendarId)){
+          const chgBtn = document.createElement("button");
+          chgBtn.className = "miniBtn";
+    chgBtn.textContent = "🔀 Cambiar de manager";
+          chgBtn.onclick = () => openChangeManagerModal(c);
+          actions.appendChild(chgBtn);
+    }
   el.appendChild(actions);
 }
 
@@ -680,6 +699,41 @@ function openObservacionesModal(c){
     close(); render();
   };
 }
+/* ===================== CAMBIAR DE MANAGER (solo calendarios compartidos) ===================== */
+function openChangeManagerModal(c){
+    const body = document.createElement("div");
+    const opciones = STATE.managers
+          .map(m => m.name)
+          .filter(n => n !== c.manager)
+          .sort((a,b)=>a.localeCompare(b));
+    body.innerHTML = `
+      <h3>🔀 Cambiar de manager — ${esc(c.nombre)}</h3>
+        <p style="font-size:12.5px;color:var(--muted);">Manager actual: <b>${esc(c.manager)}</b>. Elige el nuevo manager:</p>
+          <div id="mgrPickList" style="display:flex;flex-direction:column;gap:8px;margin-top:10px;"></div>
+            <div class="modalbtns">
+              <button class="btncancel" id="chgCancel">Cancelar</button>
+                </div>
+                  `;
+    const close = showModal(body);
+    body.querySelector("#chgCancel").onclick = close;
+    const list = body.querySelector("#mgrPickList");
+    opciones.forEach(nombreManager => {
+          const btn = document.createElement("button");
+          btn.className = "namebtn";
+          btn.textContent = nombreManager;
+          btn.onclick = async () => {
+                  btn.disabled = true;
+                  btn.textContent = "Guardando…";
+                  c.manager = nombreManager;
+                  const res = await saveClientRemote(c, ['nombre','manager']);
+                  showBadge(res.ok);
+                  close();
+                  render();
+          };
+          list.appendChild(btn);
+    });
+}
+
 function formatDate(iso){
   if(!iso) return "";
   const [y,m,d] = iso.split("-");
