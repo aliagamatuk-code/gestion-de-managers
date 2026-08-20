@@ -480,11 +480,16 @@ const head = document.createElement("div");
   head.innerHTML = `
   <div class="donut" style="${donutStyle(clients)}"></div>
   <div class="info"><b>${managerName}</b><span>${clients.length} cliente${clients.length===1?"":"s"}</span></div>
+  ${token ? '<button class="miniBtn" data-x="rename" title="Renombrar manager" style="margin-right:4px;">✏️</button>' : ''}
   ${token ? '<button class="miniBtn" data-x="link" title="Copiar link personal" style="margin-right:4px;">🔗</button>' : ''}
   ${token ? '<button class="miniBtn" data-x="revoke" title="Generar link nuevo (corta el acceso al anterior)" style="margin-right:4px;">🔁</button>' : ''}
   ${collapsible ? '<div class="chev">▾</div>' : ''}
   `;
   if(token){
+    head.querySelector('[data-x="rename"]').onclick = (ev) => {
+      ev.stopPropagation();
+      openRenameManagerModal(managerName);
+    };
     head.querySelector('[data-x="link"]').onclick = (ev) => {
       ev.stopPropagation();
       copyManagerLink(token, managerName);
@@ -1112,6 +1117,68 @@ function openAddManagerModal(){
     }
     showBadge(!!ok);
     close(); render();
+  };
+}
+
+/* ===================== RENOMBRAR MANAGER ===================== */
+// Cambia el nombre de un manager sin perder ningun dato: mantiene el
+// mismo link personal (token) y reasigna automaticamente a TODOS sus
+// clientes al nombre nuevo. El servidor es quien hace el cambio real;
+// aca solo se le pide y se refresca la pantalla con lo que confirme.
+function openRenameManagerModal(oldName){
+  const body = document.createElement("div");
+  body.innerHTML = `
+  <h3>✏️ Renombrar manager</h3>
+  <p style="font-size:12.5px;color:var(--muted);">Esto cambia el nombre en todos los clientes de <b>${esc(oldName)}</b> y mantiene su mismo link personal. No se pierde ningún dato ni cliente.</p>
+  <label>Nombre nuevo</label>
+  <input type="text" id="rnName" value="${esc(oldName)}">
+  <div id="rnErr"></div>
+  <div class="modalbtns">
+  <button class="btncancel" id="rnCancel">Cancelar</button>
+  <button class="btnok" id="rnSave">Guardar</button>
+  </div>
+  `;
+  const close = showModal(body);
+  body.querySelector("#rnCancel").onclick = close;
+  const input = body.querySelector("#rnName");
+  input.focus();
+  input.select();
+  body.querySelector("#rnSave").onclick = async () => {
+    const newName = input.value.trim();
+    if(!newName){ input.focus(); return; }
+    if(newName === oldName){ close(); return; }
+    const saveBtn = body.querySelector("#rnSave");
+    saveBtn.disabled = true;
+    saveBtn.textContent = "Guardando…";
+    const errBox = body.querySelector("#rnErr");
+    errBox.innerHTML = "";
+    try{
+      const r = await fetch('/api/manager', {
+        method:'POST',
+        headers:{'content-type':'application/json'},
+        body: JSON.stringify({name: oldName, renameTo: newName})
+      });
+      const data = await r.json().catch(()=>({}));
+      if(!r.ok || !data.ok){
+        errBox.innerHTML = `<div class="dupewarn">⚠️ ${esc(data.message || "No se pudo renombrar. Puede que ya exista otro manager con ese nombre.")}</div>`;
+        saveBtn.disabled = false;
+        saveBtn.textContent = "Guardar";
+        return;
+      }
+      if(openCards.has(oldName)){ openCards.delete(oldName); openCards.add(newName); }
+      const fresh = await loadShared();
+      if(fresh && !fresh.error){
+        STATE = fresh;
+        if(!STATE.managers) STATE.managers = [];
+        if(!STATE.clients) STATE.clients = [];
+      }
+      showToast(`Renombrado ✓ (${data.updatedClients} cliente${data.updatedClients===1?"":"s"} actualizados)`);
+      close(); render();
+    }catch(e){
+      errBox.innerHTML = `<div class="dupewarn">⚠️ No se pudo guardar. Intenta de nuevo.</div>`;
+      saveBtn.disabled = false;
+      saveBtn.textContent = "Guardar";
+    }
   };
 }
 
