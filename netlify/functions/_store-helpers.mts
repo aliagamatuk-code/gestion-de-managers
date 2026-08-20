@@ -180,6 +180,16 @@ export function normPhone(p: any) {
 return (p || "").toString().replace(/\D/g, "").slice(-10);
 }
 
+export function normDireccion(d: any) {
+return (d || "")
+.toString()
+.trim()
+.toLowerCase()
+.normalize("NFD")
+.replace(/[̀-ͯ]/g, "")
+.replace(/\s+/g, " ");
+}
+
 export function newId() {
 return "c" + Date.now() + Math.floor(Math.random() * 1000);
 }
@@ -193,5 +203,35 @@ c.id !== excludeId &&
 normName(c.nombre) === nn &&
 np &&
 normPhone(c.telefono) === np
+);
+}
+
+// Duplicado "amplio": alcanza con que UNO solo de los tres datos
+// coincida (nombre, telefono O direccion) para considerarlo duplicado.
+// Esto es MAS estricto que findDuplicate (que exige nombre Y telefono
+// juntos). Se usa unicamente cuando el ADMINISTRADOR agrega o edita un
+// cliente a mano (formulario manual o "Pegar y cargar con IA"), para
+// que Omar nunca pueda cargar sin querer el mismo cliente dos veces.
+// Las citas que llegan solas por el Webhook de GoHighLevel (ver
+// appointment.mts) siguen usando findDuplicate, la version mas
+// estricta: asi no se pierde una cita real solo porque compartio
+// telefono o direccion con otro cliente distinto (por ejemplo, dos
+// integrantes de la misma familia).
+export function findDuplicateAmplio(
+clients: any[],
+nombre: any,
+telefono: any,
+direccion: any,
+excludeId: any
+) {
+const nn = normName(nombre);
+const np = normPhone(telefono);
+const nd = normDireccion(direccion);
+return clients.find(
+(c: any) =>
+c.id !== excludeId &&
+((nn && normName(c.nombre) === nn) ||
+(np && normPhone(c.telefono) === np) ||
+(nd && normDireccion(c.direccion) === nd))
 );
 }
