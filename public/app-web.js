@@ -15,15 +15,6 @@ const ESTADO_COLOR = {
 // de estos estados, cuya fecha de cita ya paso, se considera "vencido
 // y pendiente de completar informacion de gestion".
 const ESTADOS_PENDIENTES_GESTION = ["Activo","Pendiente"];
-// Calendarios "compartidos" (reciben citas de clientes de distintas
-// zonas). Solo en clientes que vinieron de uno de estos calendarios
-// se puede usar el boton de "Cambiar de manager" - en los demas
-// clientes no aplica, porque su manager ya quedo bien asignado desde
-// el principio.
-const CALENDARIOS_REASIGNABLES = [
-    "38mQym1YLkX4RdLT0Gmc", // Water Quality Assessment
-    "A5AyPCIXAZoOQsBnBj3K", // Water Quality Assessment RP
-  ];
 const LOCK_KEY = "gestion-managers-device-lock";
 // Guarda el codigo secreto del link personal de un manager en este
 // dispositivo, para que no tenga que volver a tocar el link cada vez
@@ -186,13 +177,6 @@ function showToast(msg, isErr){
   setTimeout(()=>{ b.className = "savebadge"; }, 1800);
 }
 
-/* ===================== NORMALIZATION / DUPLICATES ===================== */
-function normName(n){ return (n||"").toString().trim().toLowerCase().replace(/\s+/g," "); }
-function normPhone(p){ return (p||"").toString().replace(/\D/g,"").slice(-10); }
-function findDuplicate(nombre, telefono, excludeId){
-  const nn = normName(nombre), np = normPhone(telefono);
-  return STATE.clients.find(c => c.id !== excludeId && normName(c.nombre)===nn && (np && normPhone(c.telefono)===np));
-}
 function newId(){
   return "c" + Date.now() + Math.floor(Math.random()*1000);
 }
@@ -670,16 +654,14 @@ if(isAdmin){
   delBtn.onclick = () => confirmDeleteClient(c);
   actions.appendChild(editBtn);
   actions.appendChild(delBtn);
-  // El boton de "Cambiar de manager" solo aparece si este cliente vino
-    // de uno de los calendarios compartidos (Water Quality Assessment o
-    // su version RP). En los demas clientes no se muestra.
-    if(c.calendarId && CALENDARIOS_REASIGNABLES.includes(c.calendarId)){
-          const chgBtn = document.createElement("button");
-          chgBtn.className = "miniBtn";
-    chgBtn.textContent = "🔀 Cambiar de manager";
-          chgBtn.onclick = () => openChangeManagerModal(c);
-          actions.appendChild(chgBtn);
-    }
+  // El boton de "Cambiar de manager" aparece en todos los clientes,
+  // solo para el administrador (esta dentro del bloque isAdmin). Deja
+  // reasignar cualquier cliente a otro manager en cualquier momento.
+  const chgBtn = document.createElement("button");
+  chgBtn.className = "miniBtn";
+  chgBtn.textContent = "🔀 Cambiar de manager";
+  chgBtn.onclick = () => openChangeManagerModal(c);
+  actions.appendChild(chgBtn);
   el.appendChild(actions);
 }
 
@@ -874,16 +856,10 @@ function openClientForm(managerName, existing){
   body.querySelector("#cfCancel").onclick = close;
   body.querySelector("#cfSave").onclick = async () => {
     const nombre = body.querySelector("#cfNombre").value.trim();
-    const telefono = body.querySelector("#cfTelefono").value.trim();
     if(!nombre){ body.querySelector("#cfNombre").focus(); return; }
-    const dupe = findDuplicate(nombre, telefono, existing ? existing.id : null);
-    if(dupe && !body.dataset.confirmedDupe){
-      body.querySelector("#cfDupe").innerHTML = `<div class="dupewarn">⚠️ Ya existe un cliente similar: <b>${esc(dupe.nombre)}</b> (${esc(dupe.manager)}). Toca "Guardar" otra vez para guardar de todas formas.</div>`;
-      body.dataset.confirmedDupe = "1";
-      return;
-    }
     const data = {
-      nombre, telefono,
+      nombre,
+      telefono: body.querySelector("#cfTelefono").value.trim(),
       direccion: body.querySelector("#cfDireccion").value.trim(),
       fechaCita: body.querySelector("#cfFecha").value.trim(),
       idioma: body.querySelector("#cfIdioma").value.trim(),
@@ -892,20 +868,34 @@ function openClientForm(managerName, existing){
     const saveBtn = body.querySelector("#cfSave");
     saveBtn.disabled = true;
     saveBtn.textContent = "Guardando…";
+    const dupeBox = body.querySelector("#cfDupe");
+    dupeBox.innerHTML = "";
+    // El servidor es quien decide si es duplicado (mira TODOS los
+    // clientes, no solo los que ya estan cargados en esta pantalla), y
+    // NO deja guardar si lo es: no hay boton para "guardar de todas
+    // formas". Por eso mandamos directo a guardar y recien ahi miramos
+    // si vino un error de duplicado.
+    const payload = existing
+      ? { ...existing, ...data }
+      : { manager: managerName, estado:"Pendiente", fechaPago:"", pagoFecha:"", pagoMonto:"", pagoForma:"", observaciones:"", revisar:false, ...data };
+    const res = await saveClientRemote(payload);
+    if(!res.ok){
+      if(res.data && res.data.error === "duplicate_client"){
+        dupeBox.innerHTML = `<div class="dupewarn">🚫 No se puede, cliente duplicado en el manager ${esc(res.data.managerName || "")}.</div>`;
+      } else {
+        dupeBox.innerHTML = `<div class="dupewarn">⚠️ No se pudo guardar. Intenta de nuevo.</div>`;
+      }
+      saveBtn.disabled = false;
+      saveBtn.textContent = "Guardar";
+      return;
+    }
+    showBadge(true);
     if(existing){
       Object.assign(existing, data);
-      const res = await saveClientRemote(existing);
-      showBadge(res.ok);
-      close(); render();
-    } else {
-      const newClient = { manager: managerName, estado:"Pendiente", fechaPago:"", pagoFecha:"", pagoMonto:"", pagoForma:"", observaciones:"", revisar:false, ...data };
-      const res = await saveClientRemote(newClient);
-      showBadge(res.ok);
-      if(res.ok && res.data && res.data.client){
-        STATE.clients.push(res.data.client);
-      }
-      close(); render();
+    } else if(res.data && res.data.client){
+      STATE.clients.push(res.data.client);
     }
+    close(); render();
   };
 }
 function esc(s){ return (s||"").toString().replace(/"/g,"&quot;").replace(/</g,"&lt;"); }
@@ -940,27 +930,30 @@ function openAiPasteModal(managerName){
         goBtn.disabled = false;
         return;
       }
-      let added = 0, skipped = [];
-      const toSave = [];
-      parsed.forEach(p => {
-        if(!p.nombre) return;
-        const dupe = findDuplicate(p.nombre, p.telefono, null);
-        if(dupe){ skipped.push(p.nombre); return; }
-        toSave.push({
-          manager: managerName, estado:"Pendiente", fechaPago:"", pagoFecha:"", pagoMonto:"", pagoForma:"", observaciones:"", revisar:false,
-          nombre: p.nombre || "", telefono: p.telefono || "", direccion: p.direccion || "",
-          fechaCita: p.fechaCita || "", idioma: p.idioma || "", notas: p.notas || ""
-        });
-      });
-      const results = await Promise.all(toSave.map(nc => saveClientRemote(nc)));
-      results.forEach(res => {
+      const candidatos = parsed.filter(p => p.nombre).map(p => ({
+        manager: managerName, estado:"Pendiente", fechaPago:"", pagoFecha:"", pagoMonto:"", pagoForma:"", observaciones:"", revisar:false,
+        nombre: p.nombre || "", telefono: p.telefono || "", direccion: p.direccion || "",
+        fechaCita: p.fechaCita || "", idioma: p.idioma || "", notas: p.notas || ""
+      }));
+      let added = 0;
+      const skipped = [];
+      // Se guardan de a uno, no todos a la vez: asi, si dos clientes
+      // del mismo texto pegado son en realidad la misma persona, el
+      // servidor ya tiene guardado al primero cuando revisa al
+      // segundo, y tambien lo detecta como duplicado.
+      for(const nc of candidatos){
+        const res = await saveClientRemote(nc);
         if(res.ok && res.data && res.data.client){
           STATE.clients.push(res.data.client);
           added++;
+        } else if(res.data && res.data.error === "duplicate_client"){
+          skipped.push(`${nc.nombre} (ya está con ${res.data.managerName})`);
+        } else {
+          skipped.push(`${nc.nombre} (no se pudo guardar)`);
         }
-      });
+      }
       let msg = `<div class="helptext">✅ ${added} cliente(s) agregado(s).`;
-      if(skipped.length) msg += ` Omitidos por duplicado: ${skipped.join(", ")}.`;
+      if(skipped.length) msg += ` Omitidos por duplicado: ${skipped.join("; ")}.`;
       msg += `</div>`;
       statusEl.innerHTML = msg;
       setTimeout(()=>{ close(); render(); }, 1400);
