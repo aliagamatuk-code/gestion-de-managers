@@ -8,7 +8,7 @@ saveClient,
 deleteClient,
 addManagerIfMissing,
 deleteManagerAndClients,
-findDuplicate,
+findDuplicateAmplio,
 findManagerByToken,
 regenerateManagerToken,
 newId,
@@ -125,19 +125,38 @@ if (!nombre) return json({ error: "missing_nombre" }, 400);
 const manager = (body.manager || "").toString().trim();
 if (!manager) return json({ error: "missing_manager" }, 400);
 
+// No se acepta cargar (ni editar hacia) un cliente duplicado: alcanza
+// con que coincida el nombre, el telefono O la direccion con otro
+// cliente que ya existe (en cualquier manager). Si se esta editando
+// ese mismo cliente, no cuenta contra si mismo (por eso se excluye
+// body.id). Esto se revisa siempre en el servidor, sin excepcion, asi
+// que no hay forma de guardar un duplicado ni saltandose la pantalla.
+const existingClients = await getAllClients();
+const dupe = findDuplicateAmplio(
+existingClients,
+nombre,
+body.telefono,
+body.direccion,
+body.id || null
+);
+if (dupe) {
+return json(
+{
+error: "duplicate_client",
+message: `No se puede, cliente duplicado en el manager ${dupe.manager}.`,
+managerName: dupe.manager,
+duplicateId: dupe.id,
+},
+409
+);
+}
+
 let client: any;
 if (body.id) {
 const existing = await getClient(body.id);
 if (!existing) return json({ error: "not_found" }, 404);
 client = { ...existing, ...body };
 } else {
-if (!body.skipDuplicateCheck) {
-const existingClients = await getAllClients();
-const dupe = findDuplicate(existingClients, nombre, body.telefono, null);
-if (dupe) {
-return json({ ok: true, created: false, duplicate: true, client: dupe });
-}
-}
 client = {
 id: newId(),
 manager,
