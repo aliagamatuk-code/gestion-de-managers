@@ -77,6 +77,48 @@ await s.set(MIGRATION_KEY_TOKENS, "1");
 
 export type ManagerRecord = { name: string; token: string };
 
+// Cambia el nombre de un manager que ya existe (por ejemplo, si otra
+// persona toma su lugar, o para corregir un nombre mal escrito).
+// Mantiene el MISMO link personal (token): quien ya tenia ese link
+// guardado sigue entrando igual, solo que ahora ve el nombre nuevo.
+// Ademas reasigna automaticamente TODOS los clientes que tenia ese
+// manager al nombre nuevo, asi que no se pierde ningun dato ni cliente
+// en el cambio. Si ya existe otro manager con el nombre nuevo, no se
+// permite el cambio (para no mezclar sin querer a dos managers
+// distintos en uno solo).
+export async function renameManager(
+oldName: string,
+newName: string
+): Promise<
+| { ok: true; manager: ManagerRecord; updatedClients: number }
+| { ok: false; error: string }
+> {
+await ensureMigrated();
+await ensureManagerTokens();
+const s = store();
+const managers = await getManagers();
+const idx = managers.findIndex((m) => m.name === oldName);
+if (idx === -1) return { ok: false, error: "not_found" };
+const clash = managers.some(
+(m, i) => i !== idx && normName(m.name) === normName(newName)
+);
+if (clash) return { ok: false, error: "name_taken" };
+
+managers[idx] = { name: newName, token: managers[idx].token };
+await s.setJSON("managers", managers);
+
+const clients = await getAllClients();
+let updatedClients = 0;
+for (const c of clients) {
+if (c.manager === oldName) {
+c.manager = newName;
+await s.setJSON("client:" + c.id, c);
+updatedClients++;
+}
+}
+return { ok: true, manager: managers[idx], updatedClients };
+}
+
 export async function getManagers(): Promise<ManagerRecord[]> {
 await ensureMigrated();
 await ensureManagerTokens();
