@@ -1,13 +1,20 @@
 /* ===================== CONFIG ===================== */
-const ESTADOS = ["Activo","Pendiente","Reprogramado","No se vendió","Vendido pendiente de pago","Pagado"];
+const ESTADOS = ["Activo","Pendiente","Reprogramado","No atendió","No se vendió","Vendido pendiente de pago","Pagado"];
 const ESTADO_COLOR = {
   "Activo":"var(--st-activo)",
   "Pendiente":"var(--st-pendiente)",
   "Reprogramado":"var(--st-reprogramado)",
+  "No atendió":"var(--st-noatendio)",
   "No se vendió":"var(--st-novendio)",
   "Vendido pendiente de pago":"var(--st-vendidopend)",
   "Pagado":"var(--st-pagado)"
 };
+// Estados que significan "todavia no se actualizo nada despues de la
+// cita" (los dos valores por defecto: uno para citas que llegan solas
+// por Webhook, otro para clientes agregados a mano). Un cliente en uno
+// de estos estados, cuya fecha de cita ya paso, se considera "vencido
+// y pendiente de completar informacion de gestion".
+const ESTADOS_PENDIENTES_GESTION = ["Activo","Pendiente"];
 // Calendarios "compartidos" (reciben citas de clientes de distintas
 // zonas). Solo en clientes que vinieron de uno de estos calendarios
 // se puede usar el boton de "Cambiar de manager" - en los demas
@@ -190,6 +197,36 @@ function newId(){
   return "c" + Date.now() + Math.floor(Math.random()*1000);
 }
 
+/* ===================== CITAS VENCIDAS SIN ACTUALIZAR ===================== */
+// Interpreta el texto de fechaCita (normalmente "13/6/2026, 10:00:00",
+// el mismo formato que manda GoHighLevel y que se usa al agregar un
+// cliente a mano). Si no se puede entender el texto, devuelve null en
+// vez de arriesgarse a adivinar mal una fecha.
+function parseFechaCita(str){
+  if(!str) return null;
+  const s = str.toString().trim();
+  const m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4}),?\s*(\d{1,2}):(\d{2})(?::(\d{2}))?/);
+  if(m){
+    const [, d, mo, y, h, mi, se] = m;
+    const dt = new Date(Number(y), Number(mo)-1, Number(d), Number(h), Number(mi), Number(se||0));
+    return isNaN(dt.getTime()) ? null : dt;
+  }
+  // Formato de respaldo (por si algun dia llega una fecha en formato ISO).
+  const dt2 = new Date(s);
+  return isNaN(dt2.getTime()) ? null : dt2;
+}
+// Un cliente cuenta como "vencido y pendiente de completar informacion
+// de gestion" cuando: (1) su estado sigue en Activo o Pendiente (nadie
+// toco nada despues de que se agendo la cita), y (2) la fecha de esa
+// cita ya paso. Si no se pudo leer la fecha, no se marca (mejor no
+// avisar de mas que arriesgarse a marcar algo que no corresponde).
+function isVencidoPendiente(c){
+  if(!ESTADOS_PENDIENTES_GESTION.includes(c.estado)) return false;
+  const dt = parseFechaCita(c.fechaCita);
+  if(!dt) return false;
+  return dt.getTime() < Date.now();
+}
+
 /* ===================== INIT ===================== */
 async function init(){
   // Si el link trae "?m=CODIGO", esta persona entro por el link
@@ -218,6 +255,10 @@ async function init(){
     STATE = { managers: [{name: shared.managerName, token: managerToken}], clients: shared.clients || [] };
     CURRENT_USER = { type: "manager", name: shared.managerName, token: managerToken };
     render();
+    // Cada vez que el manager abre su link, si tiene clientes con la
+    // cita ya vencida y sin actualizar, se lo avisamos con un mensaje.
+    const vencidos = STATE.clients.filter(isVencidoPendiente).length;
+    if(vencidos > 0) showPendingUpdateModal(vencidos);
     return;
   }
 
@@ -351,6 +392,19 @@ function confirmLogout(){
   };
 }
 
+/* ===================== AVISO DE CITAS VENCIDAS SIN ACTUALIZAR ===================== */
+function showPendingUpdateModal(count){
+  const body = document.createElement("div");
+  body.innerHTML = `
+  <h3>⚠️ Actualiza tu información</h3>
+  <p style="font-size:14.5px;">Debes actualizar información de <b>${count}</b> cliente${count===1?"":"s"}.</p>
+  <p style="font-size:12.5px;color:var(--muted);">Son clientes cuya cita ya pasó y todavía figuran como "Activo" o "Pendiente". Están marcados en rojo en tu lista, más abajo.</p>
+  <div class="modalbtns"><button class="btnok" id="pendOk">Entendido</button></div>
+  `;
+  const close = showModal(body);
+  body.querySelector("#pendOk").onclick = close;
+}
+
 /* ===================== MODAL HELPER ===================== */
 function showModal(innerNode){
   const overlay = document.createElement("div");
@@ -403,6 +457,7 @@ function donutStyle(clients){
 function cssColor(varStr){
   const map = {
     "var(--st-activo)":"#2E6FC4","var(--st-pendiente)":"#8A8F98","var(--st-reprogramado)":"#7B4FC9",
+    "var(--st-noatendio)":"#8D6346",
     "var(--st-novendio)":"#C4472B","var(--st-vendidopend)":"#D98B1F","var(--st-pagado)":"#1E8A5A"
   };
   return map[varStr] || "#ccc";
@@ -424,7 +479,15 @@ function deleteManager(managerName){
 }
 
 function renderManagerCard(managerName, collapsible, token){
-  const clients = STATE.clients.filter(c => c.manager === managerName);
+  // Orden de la lista: el cliente cuya cita se AGENDO mas recientemente
+  // (campo creadoEn) va arriba, sin importar para que fecha sea esa
+  // cita. Asi se puede confirmar de un vistazo que una reserva nueva
+  // esta entrando bien por la automatizacion. Los clientes que existian
+  // antes de este cambio no tienen creadoEn: quedan despues de
+  // cualquier cliente nuevo, en el mismo orden en que ya estaban.
+  const clients = STATE.clients
+    .filter(c => c.manager === managerName)
+    .sort((a,b) => (b.creadoEn||0) - (a.creadoEn||0));
   const card = document.createElement("div");
   card.className = "mgrcard" + (openCards.has(managerName) || !collapsible ? " open" : "");
 
@@ -506,8 +569,9 @@ const list = document.createElement("div");
 /* ===================== CLIENT CARD ===================== */
 function renderClientCard(c){
   const isAdmin = CURRENT_USER.type === "admin";
+  const vencido = isVencidoPendiente(c);
   const el = document.createElement("div");
-  el.className = "clientcard";
+  el.className = "clientcard" + (vencido ? " vencido" : "");
   const telHref = c.telefono ? `tel:${c.telefono.replace(/[^0-9+]/g,"")}` : "#";
   el.innerHTML = `
   <div class="cname">${esc(c.nombre)}</div>
@@ -518,6 +582,7 @@ function renderClientCard(c){
   ${c.idioma ? `🗣️ Idioma: ${esc(c.idioma)}<br>` : ""}
   ${c.notas ? `📝 ${esc(c.notas)}` : ""}
   </div>
+  ${vencido ? '<div class="vencidoflag">🔴 Cita vencida sin actualizar</div>' : ""}
   ${c.revisar ? '<div class="revisarflag">⚠️ Revisar: estado heredado del sistema anterior</div>' : ""}
   `;
 
@@ -554,7 +619,7 @@ if(c.estado === "Pagado"){
 
 const payWrap = document.createElement("div");
   if(c.fechaPago){
-    payWrap.innerHTML = `<span class="paydateset">📅 Fecha esperada de pago: ${formatDate(c.fechaPago)}
+    payWrap.innerHTML = `<span class="paydateset">📅 Fecha de pago: ${formatDate(c.fechaPago)}
     <button data-x="clr">✕</button></span>`;
     payWrap.querySelector('[data-x="clr"]').onclick = () => {
       c.fechaPago = "";
@@ -564,7 +629,7 @@ const payWrap = document.createElement("div");
   } else {
     const b = document.createElement("button");
     b.className = "paydatebtn";
-    b.textContent = "📅 Fecha esperada de pago";
+    b.textContent = "📅 Fecha de pago";
     b.onclick = () => openPayDateModal(c);
     payWrap.appendChild(b);
   }
@@ -1126,7 +1191,7 @@ function openInstallModal(){
 
 /* ===================== EXCEL EXPORT ===================== */
 const EXCEL_HEADERS = ["#","Manager","Nombre","Teléfono","Dirección","Fecha Cita","Idioma","Notas","Estado",
-  "Fecha esperada de pago","Día de pago","Monto pagado","Forma de pago","Observaciones"];
+  "Fecha de pago","Día de pago","Monto pagado","Forma de pago","Observaciones"];
 
 function buildClientSheet(clients){
   const rows = [EXCEL_HEADERS];
