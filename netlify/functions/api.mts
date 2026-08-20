@@ -11,6 +11,7 @@ deleteManagerAndClients,
 findDuplicateAmplio,
 findManagerByToken,
 regenerateManagerToken,
+renameManager,
 newId,
 } from "./_store-helpers.mts";
 
@@ -206,6 +207,35 @@ if (path === "/api/manager") {
 if (method === "POST") {
 const body = await req.json();
 if (body.token) return json({ error: "forbidden" }, 403);
+
+// Renombrar un manager que ya existe: mantiene su mismo link
+// personal y reasigna automaticamente a todos sus clientes al
+// nombre nuevo, sin perder ningun dato.
+if (body.renameTo) {
+const oldName = (body.name || "").toString().trim();
+const newName = (body.renameTo || "").toString().trim();
+if (!oldName || !newName) return json({ error: "missing_name" }, 400);
+const result = await renameManager(oldName, newName);
+if (!result.ok) {
+if (result.error === "not_found") return json({ error: "not_found" }, 404);
+if (result.error === "name_taken") {
+return json(
+{
+error: "name_taken",
+message: `Ya existe un manager con el nombre "${newName}".`,
+},
+409
+);
+}
+return json({ error: result.error }, 400);
+}
+return json({
+ok: true,
+manager: result.manager,
+updatedClients: result.updatedClients,
+});
+}
+
 const name = (body.name || "").toString().trim();
 if (!name) return json({ error: "missing_name" }, 400);
 // Generar un link nuevo para un manager que ya existe: invalida el
