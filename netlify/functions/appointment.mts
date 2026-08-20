@@ -139,6 +139,10 @@ pagoForma: "",
 observaciones: "",
 revisar: false,
 calendarId,
+// Marca de tiempo de creacion (ver nota igual en api.mts). Con esto
+// la pantalla del manager puede mostrar arriba la ultima cita que
+// llego por Webhook, sin importar la fecha de la cita en si.
+creadoEn: Date.now(),
 };
 
 await saveClient(client);
