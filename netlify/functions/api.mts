@@ -154,6 +154,13 @@ pagoMonto: body.pagoMonto || "",
 pagoForma: body.pagoForma || "",
 observaciones: body.observaciones || "",
 revisar: !!body.revisar,
+// Marca de tiempo de creacion del registro (distinta de fechaCita,
+// que es la fecha de la cita en si). Sirve para poder ordenar la
+// lista por "lo ultimo que se agendo" en vez de por la fecha de la
+// cita. Los clientes viejos (creados antes de este cambio) no la
+// tienen, y por eso en pantalla quedan despues de cualquier cliente
+// nuevo, sin necesidad de tocar sus datos.
+creadoEn: Date.now(),
 };
 }
 if (pagoIncompleto(client)) {
