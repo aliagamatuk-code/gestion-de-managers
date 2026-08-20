@@ -26,6 +26,7 @@
     --st-novendio:#C4472B;
     --st-vendidopend:#D98B1F;
     --st-pagado:#1E8A5A;
+    --st-noatendio:#8D6346;
   }
   *{box-sizing:border-box;}
   html,body{margin:0;padding:0;background:var(--bg);color:var(--ink);
@@ -82,6 +83,10 @@
   .clientcard .cmeta a{color:var(--teal-dark);text-decoration:none;}
   .revisarflag{display:inline-block;margin-top:6px;font-size:11px;background:#FCEFD8;
     color:var(--warn);padding:2px 8px;border-radius:20px;font-weight:600;}
+  .vencidoflag{display:inline-block;margin-top:6px;font-size:11px;background:#FBE1DB;
+    color:var(--danger);padding:2px 8px;border-radius:20px;font-weight:600;}
+  .clientcard.vencido{border-color:var(--danger);background:#FDF2F0;}
+  .clientcard.vencido .cname{color:var(--danger);}
   .statusrow{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px;}
   .statuspill{font-size:11px;padding:5px 9px;border-radius:20px;border:1.5px solid var(--line);
     background:#fff;color:var(--muted);cursor:pointer;font-weight:600;}
