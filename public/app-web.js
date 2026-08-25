@@ -777,7 +777,8 @@ function openChangeManagerModal(c){
                   btn.disabled = true;
                   btn.textContent = "Guardando…";
                   c.manager = nombreManager;
-                  const res = await saveClientRemote(c, ['nombre','manager']);
+            c.creadoEn = Date.now();
+                  const res = await saveClientRemote(c, ['nombre','manager','creadoEn']);
                   showBadge(res.ok);
                   close();
                   render();
