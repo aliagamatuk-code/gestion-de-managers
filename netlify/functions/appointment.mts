@@ -271,6 +271,7 @@ observaciones: "",
 // uno de los 2 calendarios compartidos), lo marcamos para que Omar lo
 // confirme a mano, en vez de arriesgarnos a asignarlo mal.
 revisar: necesitaRevision,
+creadoEn: Date.now(),
 // Guardamos de que calendario vino esta cita. Sirve, por ejemplo,
 // para saber si un cliente vino de un calendario "compartido" entre
 // varias zonas (como "Water Quality Assessment" o su version RP),
