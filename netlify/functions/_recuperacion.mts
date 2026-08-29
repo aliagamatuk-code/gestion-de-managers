@@ -7,7 +7,7 @@
 // mismo patron que ya usa el workflow de recordatorios diarios a los
 // managers.
 const GHL_WEBHOOK_URL =
-  "https://services.leadconnectorhq.com/hooks/FKaqd7bO77dIglaZ0xEk/webhook-trigger/3KGD1VqdS1zKwb0Ol1PZ";
+  "https://services.leadconnectorhq.com/hooks/FKaqd7bO77dlglaZ0xEk/webhook-trigger/3KGD1VqdS1zKwb0Ol1PZ";
 
 // Link de reagendamiento que se agrega al final del mensaje.
 const BOOKING_LINK = "https://api.leadconnectorhq.com/widget/booking/38mQym1YLkX4RdLT0Gmc";
