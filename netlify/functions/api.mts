@@ -131,8 +131,12 @@ export default async (req: Request, context: Context) => {
           if (pagoIncompleto(client)) {
             return json({ error: "pago_incompleto" }, 400);
           }
-          await manejarTransicionNoAtendio(existing.estado, client);
+          // Guardamos el cambio de estado PRIMERO, antes de intentar mandar el
+          // SMS de recuperacion. Asi, aunque GoHighLevel tarde o falle, el
+          // cambio de estado del cliente nunca se pierde.
           await saveClient(client);
+          await manejarTransicionNoAtendio(existing.estado, client);
+          if (client.recuperacionEnvios) await saveClient(client);
           return json({ ok: true, client });
         }
 
@@ -205,8 +209,12 @@ export default async (req: Request, context: Context) => {
           return json({ error: "pago_incompleto" }, 400);
         }
         await addManagerIfMissing(client.manager);
-        await manejarTransicionNoAtendio(estadoAntesDeGuardar, client);
+        // Guardamos el cambio de estado PRIMERO, antes de intentar mandar el
+        // SMS de recuperacion. Asi, aunque GoHighLevel tarde o falle, el
+        // cambio de estado del cliente nunca se pierde.
         await saveClient(client);
+        await manejarTransicionNoAtendio(estadoAntesDeGuardar, client);
+        if (client.recuperacionEnvios) await saveClient(client);
         return json({ ok: true, client });
       }
       if (method === "DELETE") {
