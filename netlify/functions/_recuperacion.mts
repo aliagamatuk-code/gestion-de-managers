@@ -67,6 +67,11 @@ export function componerMensajeRecuperacion(client: any): string {
 // que nunca se caiga el guardado del cliente por culpa de este envio.
 export async function enviarRecuperacion(client: any): Promise<boolean> {
   if (!client || !client.telefono) return false;
+  // Limite de 8 segundos: si GoHighLevel tarda mas que eso en contestar,
+  // se cancela el intento (en vez de dejar la funcion colgada esperando,
+  // lo cual antes podia arrastrar y romper el guardado del cliente).
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 8000);
   try {
     const r = await fetch(GHL_WEBHOOK_URL, {
       method: "POST",
@@ -75,6 +80,7 @@ export async function enviarRecuperacion(client: any): Promise<boolean> {
         phone: client.telefono,
         message: componerMensajeRecuperacion(client),
       }),
+      signal: controller.signal,
     });
     if (!r.ok) {
       console.warn("AVISO: fallo el envio de SMS de recuperacion", client.id, r.status);
@@ -82,8 +88,10 @@ export async function enviarRecuperacion(client: any): Promise<boolean> {
     }
     return true;
   } catch (e: any) {
-    console.warn("AVISO: error de red enviando SMS de recuperacion", client.id, e.message);
+    console.warn("AVISO: error o tiempo agotado enviando SMS de recuperacion", client.id, e.message);
     return false;
+  } finally {
+    clearTimeout(timeoutId);
   }
 }
 
