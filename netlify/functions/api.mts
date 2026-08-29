@@ -141,45 +141,78 @@ export default async (req: Request, context: Context) => {
         }
 
         // ---- Flujo normal del administrador (como ya funcionaba) ----
-        const nombre = (body.nombre || "").toString().trim();
-        if (!nombre) return json({ error: "missing_nombre" }, 400);
-        const manager = (body.manager || "").toString().trim();
-        if (!manager) return json({ error: "missing_manager" }, 400);
-
-        // No se acepta cargar (ni editar hacia) un cliente duplicado: alcanza
-        // con que coincida el nombre, el telefono O la direccion con otro
-        // cliente que ya existe (en cualquier manager). Si se esta editando
-        // ese mismo cliente, no cuenta contra si mismo (por eso se excluye
-        // body.id). Esto se revisa siempre en el servidor, sin excepcion, asi
-        // que no hay forma de guardar un duplicado ni saltandose la pantalla.
-        const existingClients = await getAllClients();
-        const dupe = findDuplicateAmplio(
-          existingClients,
-          nombre,
-          body.telefono,
-          body.direccion,
-          body.id || null
-        );
-        if (dupe) {
-          return json(
-            {
-              error: "duplicate_client",
-              message: `No se puede, cliente duplicado en el manager ${dupe.manager}.`,
-              managerName: dupe.manager,
-              duplicateId: dupe.id,
-            },
-            409
-          );
-        }
-
         let client: any;
         let estadoAntesDeGuardar: string | undefined;
+
         if (body.id) {
+          // Actualizando un cliente que ya existe. Puede venir con la ficha
+          // completa (editar cliente) o con solo un campo suelto — por
+          // ejemplo, un clic rapido en una pastilla de estado solo manda
+          // {id, estado, revisar}, SIN nombre ni manager. Por eso, cuando hay
+          // id, NUNCA exigimos nombre/manager: si no vienen en este guardado
+          // puntual, es porque no cambiaron.
           const existing = await getClient(body.id);
           if (!existing) return json({ error: "not_found" }, 404);
           estadoAntesDeGuardar = existing.estado;
           client = { ...existing, ...body };
+
+          // Solo revisamos duplicado si de verdad se esta tocando el nombre,
+          // telefono o direccion (una edicion real de ficha), no en guardados
+          // parciales como el estado.
+          if (body.nombre || body.telefono || body.direccion) {
+            const existingClients = await getAllClients();
+            const dupe = findDuplicateAmplio(
+              existingClients,
+              client.nombre,
+              client.telefono,
+              client.direccion,
+              body.id
+            );
+            if (dupe) {
+              return json(
+                {
+                  error: "duplicate_client",
+                  message: `No se puede, cliente duplicado en el manager ${dupe.manager}.`,
+                  managerName: dupe.manager,
+                  duplicateId: dupe.id,
+                },
+                409
+              );
+            }
+          }
         } else {
+          // Creando un cliente nuevo: aqui si son obligatorios nombre y
+          // manager, y siempre se revisa duplicado.
+          const nombre = (body.nombre || "").toString().trim();
+          if (!nombre) return json({ error: "missing_nombre" }, 400);
+          const manager = (body.manager || "").toString().trim();
+          if (!manager) return json({ error: "missing_manager" }, 400);
+
+          // No se acepta cargar un cliente duplicado: alcanza con que coincida
+          // el nombre, el telefono O la direccion con otro cliente que ya
+          // existe (en cualquier manager). Esto se revisa siempre en el
+          // servidor, sin excepcion, asi que no hay forma de guardar un
+          // duplicado ni saltandose la pantalla.
+          const existingClients = await getAllClients();
+          const dupe = findDuplicateAmplio(
+            existingClients,
+            nombre,
+            body.telefono,
+            body.direccion,
+            null
+          );
+          if (dupe) {
+            return json(
+              {
+                error: "duplicate_client",
+                message: `No se puede, cliente duplicado en el manager ${dupe.manager}.`,
+                managerName: dupe.manager,
+                duplicateId: dupe.id,
+              },
+              409
+            );
+          }
+
           client = {
             id: newId(),
             manager,
