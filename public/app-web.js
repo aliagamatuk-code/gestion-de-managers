@@ -20,6 +20,10 @@ const LOCK_KEY = "gestion-managers-device-lock";
 // dispositivo, para que no tenga que volver a tocar el link cada vez
 // que abre la app (aunque el link siga siendo lo que le da acceso).
 const MGR_TOKEN_KEY = "gestion-managers-token";
+// Igual que MGR_TOKEN_KEY, pero para el link personal de un sub-gestor
+// (segundo nivel de acceso, ve solo lo que su manager le derivo).
+const SUBGESTOR_TOKEN_KEY = "gestion-managers-subgestor-token";
+const VEINTICUATRO_HORAS_MS = 24*60*60*1000;
 
 let STATE = null;          // {managers:[], clients:[]}
 let CURRENT_USER = null;   // {type:'admin'} or {type:'manager', name:'...', token:'...'}
@@ -40,6 +44,8 @@ async function loadShared(token){
 
 function saveManagerToken(t){ try{ localStorage.setItem(MGR_TOKEN_KEY, t); }catch(e){} }
 function loadManagerToken(){ try{ return localStorage.getItem(MGR_TOKEN_KEY) || ""; }catch(e){ return ""; } }
+function saveSubgestorToken(t){ try{ localStorage.setItem(SUBGESTOR_TOKEN_KEY, t); }catch(e){} }
+function loadSubgestorToken(){ try{ return localStorage.getItem(SUBGESTOR_TOKEN_KEY) || ""; }catch(e){ return ""; } }
 
 // Cada cambio se guarda de inmediato, uno por uno (un cliente, o un
 // manager), en vez de reescribir toda la lista junta. Asi, si Omar y
@@ -63,10 +69,11 @@ async function saveClientRemote(client, fields){
     } else {
       base = { ...client };
     }
-    // Si quien guarda es un manager (entro por su link personal), le
-    // mandamos al servidor su codigo secreto junto con el cambio. El
-    // servidor usa ese codigo para saber quien es y que SI puede tocar.
-    const payload = (CURRENT_USER && CURRENT_USER.type === "manager")
+    // Si quien guarda es un manager o un sub-gestor (entro por su link
+    // personal), le mandamos al servidor su codigo secreto junto con el
+    // cambio. El servidor usa ese codigo para saber quien es y que SI
+    // puede tocar.
+    const payload = (CURRENT_USER && (CURRENT_USER.type === "manager" || CURRENT_USER.type === "subgestor"))
       ? { ...base, token: CURRENT_USER.token }
       : base;
     const r = await fetch('/api/client', {
@@ -99,6 +106,86 @@ async function deleteManagerRemote(name){
     const r = await fetch('/api/manager?name='+encodeURIComponent(name), {method:'DELETE'});
     return r.ok;
   }catch(e){ return false; }
+}
+
+/* ===================== SUB-GESTORES (remote) ===================== */
+// Si quien pide el cambio es un manager (entro por su link personal), el
+// servidor usa su token para saber a que manager pertenece el sub-gestor
+// (no confia en managerName si viene un token). Si es el administrador
+// (sin token), hay que mandar managerName explicito.
+function subgestorAuthPayload(managerName){
+  return (CURRENT_USER && CURRENT_USER.type === "manager")
+    ? { token: CURRENT_USER.token }
+    : { managerName };
+}
+async function addSubgestorRemote(managerName, nombre, telefono){
+  try{
+    const body = { ...subgestorAuthPayload(managerName), nombre, telefono };
+    const r = await fetch('/api/subgestor', {
+      method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(body)
+    });
+    const data = await r.json().catch(()=>({}));
+    return {ok:r.ok, data};
+  }catch(e){ return {ok:false, data:{}}; }
+}
+async function updateSubgestorRemote(managerName, id, nombre, telefono){
+  try{
+    const body = { ...subgestorAuthPayload(managerName), id, nombre, telefono };
+    const r = await fetch('/api/subgestor', {
+      method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(body)
+    });
+    const data = await r.json().catch(()=>({}));
+    return {ok:r.ok, data};
+  }catch(e){ return {ok:false, data:{}}; }
+}
+async function deleteSubgestorRemote(managerName, id){
+  try{
+    const auth = subgestorAuthPayload(managerName);
+    const qs = new URLSearchParams({ ...auth, id }).toString();
+    const r = await fetch('/api/subgestor?'+qs, {method:'DELETE'});
+    return r.ok;
+  }catch(e){ return false; }
+}
+async function derivarRemote(clientId, subgestorId){
+  try{
+    const body = { clientId, subgestorId };
+    if(CURRENT_USER && CURRENT_USER.type === "manager") body.token = CURRENT_USER.token;
+    const r = await fetch('/api/derivar', {
+      method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(body)
+    });
+    const data = await r.json().catch(()=>({}));
+    return {ok:r.ok, data};
+  }catch(e){ return {ok:false, data:{}}; }
+}
+async function liberarRemote(clientId){
+  try{
+    const body = { clientId };
+    if(CURRENT_USER && CURRENT_USER.type === "manager") body.token = CURRENT_USER.token;
+    const r = await fetch('/api/liberar', {
+      method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(body)
+    });
+    const data = await r.json().catch(()=>({}));
+    return {ok:r.ok, data};
+  }catch(e){ return {ok:false, data:{}}; }
+}
+// Vuelve a pedir al servidor los datos de la vista actual (admin o
+// manager) despues de un cambio en sub-gestores/derivaciones, para que la
+// pantalla quede sincronizada con lo que realmente quedo guardado.
+async function refreshCurrentView(){
+  if(CURRENT_USER.type === "admin"){
+    const fresh = await loadShared();
+    if(fresh && !fresh.error){
+      STATE = fresh;
+      if(!STATE.managers) STATE.managers = [];
+      if(!STATE.clients) STATE.clients = [];
+    }
+  } else if(CURRENT_USER.type === "manager"){
+    const fresh = await loadShared(CURRENT_USER.token);
+    if(fresh && !fresh.error && fresh.role === "manager"){
+      STATE.managers = [{ name: fresh.managerName, token: CURRENT_USER.token, subgestores: fresh.subgestores || [] }];
+      STATE.clients = fresh.clients || [];
+    }
+  }
 }
 
 function loadLock(){
@@ -211,6 +298,18 @@ function isVencidoPendiente(c){
   return dt.getTime() < Date.now();
 }
 
+/* ===================== DERIVACIONES SIN RESULTADO (+24h) ===================== */
+// Un cliente derivado a un sub-gestor cuenta como "alerta" cuando pasaron
+// mas de 24h desde que se derivo (c.derivadoEn) y todavia no se registro
+// ningun resultado (cambio de estado) DESPUES de esa derivacion. Si se
+// registro un resultado antes de esa derivacion (de un ciclo anterior) no
+// cuenta: por eso se compara resultadoRegistradoEn contra derivadoEn.
+function isDerivacionVencida(c){
+  if(!c.subgestorId || !c.derivadoEn) return false;
+  if(Date.now() - c.derivadoEn < VEINTICUATRO_HORAS_MS) return false;
+  return !c.resultadoRegistradoEn || c.resultadoRegistradoEn < c.derivadoEn;
+}
+
 /* ===================== INIT ===================== */
 async function init(){
   // Si el link trae "?m=CODIGO", esta persona entro por el link
@@ -219,15 +318,36 @@ async function init(){
   // URL visible, por prolijidad.
   const params = new URLSearchParams(location.search);
   const urlToken = params.get('m') || '';
+  const urlSubgestorToken = params.get('sg') || '';
   if(urlToken){
     saveManagerToken(urlToken);
     history.replaceState({}, '', location.pathname);
   }
+  if(urlSubgestorToken){
+    saveSubgestorToken(urlSubgestorToken);
+    history.replaceState({}, '', location.pathname);
+  }
   // Si este dispositivo ya estaba configurado como el de Omar (admin)
-  // y no se acaba de tocar un link nuevo, no lo cambiamos a manager
-  // por accidente aunque alguna vez haya quedado guardado un token viejo.
+  // y no se acaba de tocar un link nuevo, no lo cambiamos a manager (ni
+  // a sub-gestor) por accidente aunque alguna vez haya quedado guardado
+  // un token viejo.
   const existingLock = loadLock();
-  const managerToken = urlToken || (existingLock && existingLock.type === "admin" ? "" : loadManagerToken());
+  const noPisarAdmin = existingLock && existingLock.type === "admin";
+  const managerToken = urlToken || (noPisarAdmin ? "" : loadManagerToken());
+  const subgestorToken = urlSubgestorToken || (noPisarAdmin ? "" : loadSubgestorToken());
+
+  if(subgestorToken){
+    const shared = await loadShared(subgestorToken);
+    if(!shared || shared.error || shared.role !== "subgestor"){
+      document.getElementById("root").innerHTML =
+        '<div class="lockwrap"><h1>Este link ya no funciona</h1><p>Pídele a tu manager que te envíe tu link actualizado.</p></div>';
+      return;
+    }
+    STATE = { managers: [], clients: shared.clients || [] };
+    CURRENT_USER = { type: "subgestor", name: shared.subgestorName, managerName: shared.managerName, token: subgestorToken };
+    render();
+    return;
+  }
 
   if(managerToken){
     const shared = await loadShared(managerToken);
@@ -236,7 +356,7 @@ async function init(){
         '<div class="lockwrap"><h1>Este link ya no funciona</h1><p>Pídele a Omar que te envíe tu link actualizado.</p></div>';
       return;
     }
-    STATE = { managers: [{name: shared.managerName, token: managerToken}], clients: shared.clients || [] };
+    STATE = { managers: [{name: shared.managerName, token: managerToken, subgestores: shared.subgestores || []}], clients: shared.clients || [] };
     CURRENT_USER = { type: "manager", name: shared.managerName, token: managerToken };
     render();
     // Cada vez que el manager abre su link, si tiene clientes con la
@@ -276,9 +396,13 @@ function render(){
     app.appendChild(renderAdminToolbar());
     app.appendChild(renderSummary());
     STATE.managers.forEach(m => app.appendChild(renderManagerCard(m.name, true, m.token)));
-  } else {
+  } else if(CURRENT_USER.type === "manager"){
     app.appendChild(renderManagerToolbar());
+    app.appendChild(renderCitasHoy(STATE.clients));
     app.appendChild(renderManagerCard(CURRENT_USER.name, false, null));
+  } else {
+    app.appendChild(renderSubgestorToolbar());
+    app.appendChild(renderSubgestorClientList());
   }
   root.appendChild(app);
 }
@@ -542,6 +666,15 @@ if(CURRENT_USER.type === "admin"){
   body.appendChild(btnrow);
 }
 
+// Sub-gestores: los administra el administrador o el propio manager
+// dueño de esa cartera. Un sub-gestor nunca ve esta tarjeta (entra por
+// su propio link, ver renderSubgestorClientList).
+if(CURRENT_USER.type === "admin" || CURRENT_USER.type === "manager"){
+  const mgrRecord = STATE.managers.find(m => m.name === managerName);
+  const subgestores = (mgrRecord && mgrRecord.subgestores) || [];
+  body.appendChild(renderSubgestoresSection(managerName, subgestores));
+}
+
 const list = document.createElement("div");
   list.className = "clientlist";
   list.style.marginTop = "12px";
@@ -555,12 +688,221 @@ const list = document.createElement("div");
   return card;
 }
 
+/* ===================== SUB-GESTORES (UI) ===================== */
+function renderSubgestoresSection(managerName, subgestores){
+  const box = document.createElement("div");
+  box.className = "sgsection";
+  const head = document.createElement("div");
+  head.className = "sghead";
+  head.innerHTML = `<b>🧑‍💼 Sub-gestores</b><span>${subgestores.length}</span>`;
+  const addBtn = document.createElement("button");
+  addBtn.className = "miniBtn";
+  addBtn.textContent = "➕ Agregar";
+  addBtn.onclick = () => openSubgestorForm(managerName, null);
+  head.appendChild(addBtn);
+  box.appendChild(head);
+
+  if(subgestores.length === 0){
+    const empty = document.createElement("div");
+    empty.className = "emptynote";
+    empty.textContent = "Sin sub-gestores todavía.";
+    box.appendChild(empty);
+    return box;
+  }
+  subgestores.forEach(sg => {
+    const row = document.createElement("div");
+    row.className = "sgrow";
+    const info = document.createElement("span");
+    info.textContent = sg.nombre + (sg.telefono ? " · " + sg.telefono : "");
+    row.appendChild(info);
+    const btns = document.createElement("span");
+    const linkBtn = document.createElement("button");
+    linkBtn.className = "miniBtn"; linkBtn.title = "Copiar link personal"; linkBtn.textContent = "🔗";
+    linkBtn.onclick = () => copySubgestorLink(sg.token, sg.nombre);
+    const editBtn = document.createElement("button");
+    editBtn.className = "miniBtn"; editBtn.title = "Editar"; editBtn.textContent = "✏️";
+    editBtn.onclick = () => openSubgestorForm(managerName, sg);
+    const delBtn = document.createElement("button");
+    delBtn.className = "miniBtn"; delBtn.title = "Eliminar"; delBtn.textContent = "🗑️";
+    delBtn.onclick = () => confirmDeleteSubgestor(managerName, sg);
+    btns.appendChild(linkBtn); btns.appendChild(editBtn); btns.appendChild(delBtn);
+    row.appendChild(btns);
+    box.appendChild(row);
+  });
+  return box;
+}
+
+function openSubgestorForm(managerName, existing){
+  const body = document.createElement("div");
+  body.innerHTML = `
+  <h3>${existing ? "✏️ Editar sub-gestor" : "➕ Agregar sub-gestor"} — ${esc(managerName)}</h3>
+  <label>Nombre</label>
+  <input type="text" id="sgNombre" value="${existing ? esc(existing.nombre) : ""}">
+  <label>Teléfono</label>
+  <input type="tel" id="sgTelefono" value="${existing ? esc(existing.telefono) : ""}">
+  <div id="sgErr"></div>
+  <div class="modalbtns">
+  <button class="btncancel" id="sgCancel">Cancelar</button>
+  <button class="btnok" id="sgSave">Guardar</button>
+  </div>
+  `;
+  const close = showModal(body);
+  body.querySelector("#sgCancel").onclick = close;
+  body.querySelector("#sgSave").onclick = async () => {
+    const nombre = body.querySelector("#sgNombre").value.trim();
+    if(!nombre){ body.querySelector("#sgNombre").focus(); return; }
+    const telefono = body.querySelector("#sgTelefono").value.trim();
+    const saveBtn = body.querySelector("#sgSave");
+    saveBtn.disabled = true;
+    saveBtn.textContent = "Guardando…";
+    const res = existing
+      ? await updateSubgestorRemote(managerName, existing.id, nombre, telefono)
+      : await addSubgestorRemote(managerName, nombre, telefono);
+    if(!res.ok){
+      body.querySelector("#sgErr").innerHTML = `<div class="dupewarn">⚠️ No se pudo guardar. Intenta de nuevo.</div>`;
+      saveBtn.disabled = false;
+      saveBtn.textContent = "Guardar";
+      return;
+    }
+    await refreshCurrentView();
+    showBadge(true);
+    close(); render();
+  };
+}
+
+function confirmDeleteSubgestor(managerName, sg){
+  const body = document.createElement("div");
+  body.innerHTML = `
+  <h3>¿Eliminar sub-gestor?</h3>
+  <p style="font-size:13px;color:var(--muted);">${esc(sg.nombre)} se va a eliminar. Si tenía citas derivadas, quedan liberadas (sin sub-gestor) automáticamente para que el manager las pueda reasignar.</p>
+  <div class="modalbtns">
+  <button class="btncancel" id="dsgNo">Cancelar</button>
+  <button class="btndanger" id="dsgYes">Eliminar</button>
+  </div>
+  `;
+  const close = showModal(body);
+  body.querySelector("#dsgNo").onclick = close;
+  body.querySelector("#dsgYes").onclick = async () => {
+    const ok = await deleteSubgestorRemote(managerName, sg.id);
+    if(!ok){ showToast("No se pudo eliminar", true); close(); return; }
+    await refreshCurrentView();
+    showBadge(true);
+    close(); render();
+  };
+}
+
+/* ===================== DERIVAR / LIBERAR ===================== */
+function openDerivarModal(c){
+  const mgrRecord = STATE.managers.find(m => m.name === c.manager);
+  const subgestores = (mgrRecord && mgrRecord.subgestores) || [];
+  const body = document.createElement("div");
+  if(subgestores.length === 0){
+    body.innerHTML = `
+    <h3>↪️ Derivar — ${esc(c.nombre)}</h3>
+    <p style="font-size:12.5px;color:var(--muted);">Este manager todavía no tiene sub-gestores cargados. Agregá uno primero desde la sección "Sub-gestores" de arriba.</p>
+    <div class="modalbtns"><button class="btncancel" id="derClose">Cerrar</button></div>
+    `;
+    const close = showModal(body);
+    body.querySelector("#derClose").onclick = close;
+    return;
+  }
+  body.innerHTML = `
+  <h3>↪️ Derivar — ${esc(c.nombre)}</h3>
+  <p style="font-size:12.5px;color:var(--muted);">Elegí a qué sub-gestor derivar esta cita:</p>
+  <div id="sgPickList" style="display:flex;flex-direction:column;gap:8px;margin-top:10px;"></div>
+  <div class="modalbtns"><button class="btncancel" id="derCancel">Cancelar</button></div>
+  `;
+  const close = showModal(body);
+  body.querySelector("#derCancel").onclick = close;
+  const list = body.querySelector("#sgPickList");
+  subgestores.forEach(sg => {
+    const btn = document.createElement("button");
+    btn.className = "namebtn";
+    btn.textContent = sg.nombre + (sg.telefono ? ` — ${sg.telefono}` : "");
+    btn.onclick = async () => {
+      btn.disabled = true;
+      btn.textContent = "Guardando…";
+      const res = await derivarRemote(c.id, sg.id);
+      if(!res.ok){
+        showToast((res.data && res.data.message) || "No se pudo derivar", true);
+        btn.disabled = false;
+        btn.textContent = sg.nombre;
+        return;
+      }
+      c.subgestorId = sg.id;
+      c.subgestorNombre = sg.nombre;
+      c.derivadoEn = Date.now();
+      c.resultadoRegistradoEn = 0;
+      showBadge(true);
+      close(); render();
+    };
+    list.appendChild(btn);
+  });
+}
+
+function confirmLiberar(c){
+  const body = document.createElement("div");
+  body.innerHTML = `
+  <h3>¿Liberar esta cita?</h3>
+  <p style="font-size:13px;color:var(--muted);">${esc(c.nombre)} queda sin sub-gestor asignado. Vas a poder derivarla de nuevo después.</p>
+  <div class="modalbtns">
+  <button class="btncancel" id="libNo">Cancelar</button>
+  <button class="btnok" id="libYes">Sí, liberar</button>
+  </div>
+  `;
+  const close = showModal(body);
+  body.querySelector("#libNo").onclick = close;
+  body.querySelector("#libYes").onclick = async () => {
+    const res = await liberarRemote(c.id);
+    if(!res.ok){ showToast("No se pudo liberar", true); close(); return; }
+    c.subgestorId = "";
+    c.subgestorNombre = "";
+    c.derivadoEn = 0;
+    c.resultadoRegistradoEn = 0;
+    showBadge(true);
+    close(); render();
+  };
+}
+
+/* ===================== CITAS DE HOY (vista del manager) ===================== */
+function renderCitasHoy(clients){
+  const hoy = todayStr();
+  const citas = clients
+    .filter(c => {
+      const dt = parseFechaCita(c.fechaCita);
+      if(!dt) return false;
+      const ds = dt.getFullYear()+"-"+String(dt.getMonth()+1).padStart(2,"0")+"-"+String(dt.getDate()).padStart(2,"0");
+      return ds === hoy;
+    })
+    .sort((a,b) => parseFechaCita(a.fechaCita) - parseFechaCita(b.fechaCita));
+
+  const box = document.createElement("div");
+  box.className = "summarybox";
+  if(citas.length === 0){
+    box.innerHTML = `<h3>📅 Citas de hoy</h3><div class="emptynote">Sin citas agendadas para hoy.</div>`;
+    return box;
+  }
+  let rows = "";
+  citas.forEach(c => {
+    const dt = parseFechaCita(c.fechaCita);
+    const hora = dt ? dt.toLocaleTimeString("es", {hour:"2-digit", minute:"2-digit"}) : "";
+    const asignado = c.subgestorId ? `Sub-gestor: ${esc(c.subgestorNombre||"")}` : "Sin asignar";
+    const alerta = isDerivacionVencida(c) ? ' <span class="derivflag">🟠 +24h sin resultado</span>' : "";
+    rows += `<div class="citahoyrow${c.subgestorId?"":" sinasignar"}"><b>${esc(hora)}</b> — ${esc(c.nombre)} <span class="cmeta">(${asignado})</span>${alerta}</div>`;
+  });
+  box.innerHTML = `<h3>📅 Citas de hoy (${citas.length})</h3>${rows}`;
+  return box;
+}
+
 /* ===================== CLIENT CARD ===================== */
 function renderClientCard(c){
   const isAdmin = CURRENT_USER.type === "admin";
+  const isManager = CURRENT_USER.type === "manager";
+  const isSubgestor = CURRENT_USER.type === "subgestor";
   const vencido = isVencidoPendiente(c);
+  const derivVencida = isDerivacionVencida(c);
   const el = document.createElement("div");
-  el.className = "clientcard" + (vencido ? " vencido" : "");
+  el.className = "clientcard" + (vencido ? " vencido" : "") + (derivVencida ? " alertaderiv" : "");
   const telHref = c.telefono ? `tel:${c.telefono.replace(/[^0-9+]/g,"")}` : "#";
   el.innerHTML = `
   <div class="cname">${esc(c.nombre)}</div>
@@ -572,8 +914,40 @@ function renderClientCard(c){
   ${c.notas ? `📝 ${esc(c.notas)}` : ""}
   </div>
   ${vencido ? '<div class="vencidoflag">🔴 Cita vencida sin actualizar</div>' : ""}
+  ${derivVencida ? '<div class="derivflag">🟠 Derivada hace más de 24h sin resultado</div>' : ""}
   ${c.revisar ? '<div class="revisarflag">⚠️ Revisar: estado heredado del sistema anterior</div>' : ""}
   `;
+
+// Quién tiene esta cita: solo lo ve/edita el admin o el manager (el
+// sub-gestor ya sabe que la tiene, no necesita verlo en su propia
+// pantalla). Muestra si esta sin asignar (para poder derivarla) o a
+// que sub-gestor esta asignada (con boton para liberarla).
+if(isAdmin || isManager){
+  const asigWrap = document.createElement("div");
+  asigWrap.className = "asigwrap";
+  if(c.subgestorId){
+    const badge = document.createElement("span");
+    badge.className = "asignadoflag";
+    badge.textContent = "👤 Asignado a: " + (c.subgestorNombre || "");
+    asigWrap.appendChild(badge);
+    const libBtn = document.createElement("button");
+    libBtn.className = "miniBtn";
+    libBtn.textContent = "🔓 Liberar";
+    libBtn.onclick = () => confirmLiberar(c);
+    asigWrap.appendChild(libBtn);
+  } else {
+    const badge = document.createElement("span");
+    badge.className = "sinasignarflag";
+    badge.textContent = "⚪ Sin asignar";
+    asigWrap.appendChild(badge);
+    const derBtn = document.createElement("button");
+    derBtn.className = "miniBtn";
+    derBtn.textContent = "↪️ Derivar";
+    derBtn.onclick = () => openDerivarModal(c);
+    asigWrap.appendChild(derBtn);
+  }
+  el.appendChild(asigWrap);
+}
 
 const srow = document.createElement("div");
   srow.className = "statusrow";
@@ -667,6 +1041,20 @@ if(isAdmin){
   chgBtn.textContent = "🔀 Cambiar de manager";
   chgBtn.onclick = () => openChangeManagerModal(c);
   actions.appendChild(chgBtn);
+  el.appendChild(actions);
+}
+
+// El sub-gestor puede editar la ficha completa (nombre, telefono,
+// direccion, idioma, notas) del cliente que tiene asignado, pero no
+// puede eliminarlo ni cambiarlo de manager.
+if(isSubgestor){
+  const actions = document.createElement("div");
+  actions.className = "cactions";
+  const editBtn = document.createElement("button");
+  editBtn.className = "miniBtn";
+  editBtn.textContent = "✏️ Editar datos";
+  editBtn.onclick = () => openSubgestorEditForm(c);
+  actions.appendChild(editBtn);
   el.appendChild(actions);
 }
 
@@ -776,9 +1164,21 @@ function openChangeManagerModal(c){
           btn.onclick = async () => {
                   btn.disabled = true;
                   btn.textContent = "Guardando…";
+                  // Si esta cita estaba derivada a un sub-gestor del manager
+                  // ANTERIOR, hay que liberarla: un sub-gestor pertenece a un
+                  // solo manager, asi que no puede quedar viendo un cliente
+                  // que ya paso a otro manager distinto.
+                  const teniaSubgestor = !!c.subgestorId;
                   c.manager = nombreManager;
             c.creadoEn = Date.now();
                   const res = await saveClientRemote(c, ['nombre','manager','creadoEn']);
+                  if(res.ok && teniaSubgestor){
+                    await liberarRemote(c.id);
+                    c.subgestorId = "";
+                    c.subgestorNombre = "";
+                    c.derivadoEn = 0;
+                    c.resultadoRegistradoEn = 0;
+                  }
                   showBadge(res.ok);
                   close();
                   render();
@@ -905,6 +1305,68 @@ function openClientForm(managerName, existing){
   };
 }
 function esc(s){ return (s||"").toString().replace(/"/g,"&quot;").replace(/</g,"&lt;"); }
+
+/* ===================== EDITAR DATOS (sub-gestor) ===================== */
+// Version reducida de openClientForm para el sub-gestor: puede editar
+// nombre/telefono/direccion/idioma/notas del cliente que tiene asignado,
+// pero no ve ni puede tocar el manager (eso queda fijo).
+function openSubgestorEditForm(c){
+  const body = document.createElement("div");
+  body.className = "modalhead";
+  body.innerHTML = `
+  <button class="closeX" id="sgfX">✕</button>
+  <h3>Editar datos — ${esc(c.nombre)}</h3>
+  <label>Nombre completo</label>
+  <input type="text" id="sgfNombre" value="${esc(c.nombre)}">
+  <label>Teléfono</label>
+  <input type="tel" id="sgfTelefono" value="${esc(c.telefono)}">
+  <label>Dirección</label>
+  <input type="text" id="sgfDireccion" value="${esc(c.direccion)}">
+  <label>Idioma preferido</label>
+  <input type="text" id="sgfIdioma" placeholder="Español / Inglés" value="${esc(c.idioma)}">
+  <label>Notas</label>
+  <textarea id="sgfNotas">${esc(c.notas)}</textarea>
+  <div id="sgfDupe"></div>
+  <div class="modalbtns">
+  <button class="btncancel" id="sgfCancel">Cancelar</button>
+  <button class="btnok" id="sgfSave">Guardar</button>
+  </div>
+  `;
+  const close = showModal(body);
+  body.querySelector("#sgfX").onclick = close;
+  body.querySelector("#sgfCancel").onclick = close;
+  body.querySelector("#sgfSave").onclick = async () => {
+    const nombre = body.querySelector("#sgfNombre").value.trim();
+    if(!nombre){ body.querySelector("#sgfNombre").focus(); return; }
+    const data = {
+      id: c.id,
+      nombre,
+      telefono: body.querySelector("#sgfTelefono").value.trim(),
+      direccion: body.querySelector("#sgfDireccion").value.trim(),
+      idioma: body.querySelector("#sgfIdioma").value.trim(),
+      notas: body.querySelector("#sgfNotas").value.trim(),
+    };
+    const saveBtn = body.querySelector("#sgfSave");
+    saveBtn.disabled = true;
+    saveBtn.textContent = "Guardando…";
+    const dupeBox = body.querySelector("#sgfDupe");
+    dupeBox.innerHTML = "";
+    const res = await saveClientRemote(data);
+    if(!res.ok){
+      if(res.data && res.data.error === "duplicate_client"){
+        dupeBox.innerHTML = `<div class="dupewarn">🚫 No se puede, cliente duplicado en el manager ${esc(res.data.managerName || "")}.</div>`;
+      } else {
+        dupeBox.innerHTML = `<div class="dupewarn">⚠️ No se pudo guardar. Intenta de nuevo.</div>`;
+      }
+      saveBtn.disabled = false;
+      saveBtn.textContent = "Guardar";
+      return;
+    }
+    showBadge(true);
+    Object.assign(c, data);
+    close(); render();
+  };
+}
 
 /* ===================== AI BULK PASTE ===================== */
 function openAiPasteModal(managerName){
@@ -1038,12 +1500,52 @@ function renderManagerToolbar(){
   return box;
 }
 
+/* ===================== TOOLBAR Y LISTA DEL SUB-GESTOR ===================== */
+function renderSubgestorToolbar(){
+  const box = document.createElement("div");
+  box.className = "toolbar";
+  box.innerHTML = `
+  <button class="toolbtn" id="tbRefresh">🔄 Actualizar ahora</button>
+  <button class="toolbtn" id="tbExport">⬇️ Exportar mi Excel</button>
+  `;
+  box.querySelector("#tbRefresh").onclick = async (e) => {
+    const btn = e.currentTarget;
+    btn.textContent = "🔄 Actualizando…";
+    btn.disabled = true;
+    const fresh = await loadShared(CURRENT_USER.token);
+    if(fresh && !fresh.error && fresh.role === "subgestor"){
+      STATE.clients = fresh.clients || [];
+    }
+    render();
+  };
+  box.querySelector("#tbExport").onclick = exportMyExcel;
+  return box;
+}
+
+function renderSubgestorClientList(){
+  const wrap = document.createElement("div");
+  const title = document.createElement("h3");
+  title.style.fontSize = "14px";
+  title.style.margin = "0 0 10px";
+  title.textContent = `Mis clientes asignados (${STATE.clients.length})`;
+  wrap.appendChild(title);
+  const list = document.createElement("div");
+  list.className = "clientlist";
+  if(STATE.clients.length === 0){
+    list.innerHTML = `<div class="emptynote">Todavía no tenés clientes asignados.</div>`;
+  } else {
+    STATE.clients.forEach(c => list.appendChild(renderClientCard(c)));
+  }
+  wrap.appendChild(list);
+  return wrap;
+}
+
 // Copia al portapapeles el link personal de un manager, para que Omar
 // se lo mande por WhatsApp/mensaje directo. Con navegadores viejos o
 // sin permiso de portapapeles, muestra el link en una ventanita para
 // copiarlo a mano.
-function copyManagerLink(token, name){
-  const link = location.origin + "/?m=" + token;
+function copyRoleLink(token, name, param){
+  const link = location.origin + "/?" + param + "=" + token;
   if(navigator.clipboard && navigator.clipboard.writeText){
     navigator.clipboard.writeText(link).then(
       () => showToast("Link de " + name + " copiado ✓"),
@@ -1053,6 +1555,8 @@ function copyManagerLink(token, name){
     window.prompt("Copia este link y envíaselo a " + name + ":", link);
   }
 }
+function copyManagerLink(token, name){ copyRoleLink(token, name, "m"); }
+function copySubgestorLink(token, name){ copyRoleLink(token, name, "sg"); }
 
 // Corta el acceso al link viejo de un manager y genera uno nuevo. El
 // manager y sus clientes NO se tocan — solo cambia el codigo secreto.
@@ -1252,7 +1756,8 @@ function openInstallModal(){
 
 /* ===================== EXCEL EXPORT ===================== */
 const EXCEL_HEADERS = ["#","Manager","Nombre","Teléfono","Dirección","Fecha Cita","Idioma","Notas","Estado",
-  "Fecha de pago","Día de pago","Monto pagado","Forma de pago","Observaciones"];
+  "Fecha de pago","Día de pago","Monto pagado","Forma de pago","Observaciones",
+  "Sub-gestor asignado","Derivado el"];
 
 function buildClientSheet(clients){
   const rows = [EXCEL_HEADERS];
@@ -1262,7 +1767,9 @@ function buildClientSheet(clients){
     c.pagoFecha ? formatDate(c.pagoFecha) : "",
     c.pagoMonto || "",
     c.pagoForma || "",
-    c.observaciones || ""
+    c.observaciones || "",
+    c.subgestorNombre || "",
+    c.derivadoEn ? new Date(c.derivadoEn).toLocaleString("es") : ""
   ]));
   return XLSX.utils.aoa_to_sheet(rows);
 }
@@ -1315,6 +1822,14 @@ document.addEventListener("visibilitychange", async () => {
   if(CURRENT_USER.type === "manager"){
     const fresh = await loadShared(CURRENT_USER.token);
     if(fresh && !fresh.error && fresh.role === "manager"){
+      STATE.clients = fresh.clients || [];
+      render();
+    }
+    return;
+  }
+  if(CURRENT_USER.type === "subgestor"){
+    const fresh = await loadShared(CURRENT_USER.token);
+    if(fresh && !fresh.error && fresh.role === "subgestor"){
       STATE.clients = fresh.clients || [];
       render();
     }

@@ -75,7 +75,8 @@ await s.setJSON("managers", upgraded);
 await s.set(MIGRATION_KEY_TOKENS, "1");
 }
 
-export type ManagerRecord = { name: string; token: string };
+export type SubgestorRecord = { id: string; nombre: string; telefono: string; token: string };
+export type ManagerRecord = { name: string; token: string; subgestores?: SubgestorRecord[] };
 
 // Cambia el nombre de un manager que ya existe (por ejemplo, si otra
 // persona toma su lugar, o para corregir un nombre mal escrito).
@@ -104,7 +105,7 @@ const clash = managers.some(
 );
 if (clash) return { ok: false, error: "name_taken" };
 
-managers[idx] = { name: newName, token: managers[idx].token };
+managers[idx] = { ...managers[idx], name: newName };
 await s.setJSON("managers", managers);
 
 const clients = await getAllClients();
@@ -151,7 +152,7 @@ const s = store();
 const managers = await getManagers();
 const idx = managers.findIndex((m) => m.name === name);
 if (idx === -1) return null;
-managers[idx] = { name: managers[idx].name, token: genToken() };
+managers[idx] = { ...managers[idx], token: genToken() };
 await s.setJSON("managers", managers);
 return managers[idx];
 }
@@ -162,6 +163,108 @@ export async function findManagerByToken(token: string): Promise<ManagerRecord |
 if (!token) return null;
 const managers = await getManagers();
 return managers.find((m) => m.token === token) || null;
+}
+
+// ---- Sub-gestores ----
+// Cada manager puede tener su propia lista de "sub-gestores" (gente a la que
+// le puede derivar citas puntuales). Viven dentro del mismo registro del
+// manager (misma key "managers"), igual que el manager mismo tiene su
+// nombre + token ahi. Un sub-gestor accede con SU PROPIO token secreto,
+// generado igual que el del manager (genToken()), pero solo ve y edita los
+// clientes que tiene asignados (client.subgestorId === su id).
+
+export function genSubgestorId(): string {
+  return "sg" + Date.now() + Math.floor(Math.random() * 1000);
+}
+
+export async function addSubgestor(
+  managerName: string,
+  nombre: string,
+  telefono: string
+): Promise<{ ok: true; subgestor: SubgestorRecord } | { ok: false; error: string }> {
+  await ensureMigrated();
+  await ensureManagerTokens();
+  const s = store();
+  const managers = await getManagers();
+  const idx = managers.findIndex((m) => m.name === managerName);
+  if (idx === -1) return { ok: false, error: "not_found" };
+  const subgestor: SubgestorRecord = { id: genSubgestorId(), nombre, telefono, token: genToken() };
+  const list = managers[idx].subgestores || [];
+  list.push(subgestor);
+  managers[idx] = { ...managers[idx], subgestores: list };
+  await s.setJSON("managers", managers);
+  return { ok: true, subgestor };
+}
+
+export async function updateSubgestor(
+  managerName: string,
+  subgestorId: string,
+  data: { nombre?: string; telefono?: string }
+): Promise<{ ok: true; subgestor: SubgestorRecord } | { ok: false; error: string }> {
+  await ensureMigrated();
+  await ensureManagerTokens();
+  const s = store();
+  const managers = await getManagers();
+  const idx = managers.findIndex((m) => m.name === managerName);
+  if (idx === -1) return { ok: false, error: "not_found" };
+  const list = managers[idx].subgestores || [];
+  const sgIdx = list.findIndex((sg) => sg.id === subgestorId);
+  if (sgIdx === -1) return { ok: false, error: "not_found" };
+  list[sgIdx] = {
+    ...list[sgIdx],
+    nombre: data.nombre !== undefined ? data.nombre : list[sgIdx].nombre,
+    telefono: data.telefono !== undefined ? data.telefono : list[sgIdx].telefono,
+  };
+  managers[idx] = { ...managers[idx], subgestores: list };
+  await s.setJSON("managers", managers);
+  return { ok: true, subgestor: list[sgIdx] };
+}
+
+// Saca al sub-gestor de la lista de su manager. NO toca los clientes que
+// tuviera asignados — eso lo hace quien llama (ver el DELETE de
+// /api/subgestor en api.mts, que libera a esos clientes despues de
+// borrar aqui) para que la limpieza de citas quede a cargo de quien
+// conoce el motivo del borrado.
+export async function deleteSubgestor(
+  managerName: string,
+  subgestorId: string
+): Promise<boolean> {
+  await ensureMigrated();
+  await ensureManagerTokens();
+  const s = store();
+  const managers = await getManagers();
+  const idx = managers.findIndex((m) => m.name === managerName);
+  if (idx === -1) return false;
+  const list = managers[idx].subgestores || [];
+  const filtered = list.filter((sg) => sg.id !== subgestorId);
+  if (filtered.length === list.length) return false;
+  managers[idx] = { ...managers[idx], subgestores: filtered };
+  await s.setJSON("managers", managers);
+  return true;
+}
+
+// Busca a que manager y sub-gestor le pertenece un codigo secreto de
+// sub-gestor. Es el equivalente de findManagerByToken, un nivel mas abajo.
+export async function findManagerAndSubgestorByToken(
+  token: string
+): Promise<{ manager: ManagerRecord; subgestor: SubgestorRecord } | null> {
+  if (!token) return null;
+  const managers = await getManagers();
+  for (const m of managers) {
+    const sg = (m.subgestores || []).find((s) => s.token === token);
+    if (sg) return { manager: m, subgestor: sg };
+  }
+  return null;
+}
+
+export async function findSubgestorById(
+  managerName: string,
+  subgestorId: string
+): Promise<SubgestorRecord | null> {
+  const managers = await getManagers();
+  const mgr = managers.find((m) => m.name === managerName);
+  if (!mgr) return null;
+  return (mgr.subgestores || []).find((sg) => sg.id === subgestorId) || null;
 }
 
 export async function deleteManagerAndClients(name: string) {

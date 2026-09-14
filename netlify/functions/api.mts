@@ -13,6 +13,11 @@ import {
   regenerateManagerToken,
   renameManager,
   newId,
+  addSubgestor,
+  updateSubgestor,
+  deleteSubgestor,
+  findManagerAndSubgestorByToken,
+  findSubgestorById,
 } from "./_store-helpers.mts";
 import { enviarRecuperacion, marcarEnviado } from "./_recuperacion.mts";
 
@@ -35,6 +40,28 @@ async function manejarTransicionNoAtendio(estadoAntes: string | undefined, clien
 // (nombre, telefono, direccion, etc.) esta bloqueado para managers:
 // solo el administrador lo puede cambiar.
 const MANAGER_ALLOWED_FIELDS = [
+  "estado",
+  "pagoFecha",
+  "pagoMonto",
+  "pagoForma",
+  "observaciones",
+];
+
+// Campos que SI puede tocar un sub-gestor en un cliente que tiene
+// actualmente asignado (via su link personal). A diferencia del manager,
+// el sub-gestor puede editar tambien los datos de contacto/ficha (nombre,
+// telefono, direccion, idioma, notas) porque es quien esta en el campo
+// gestionando esa cita puntual. Lo unico que se deja afuera a proposito:
+// "manager" y "subgestorId" (eso solo lo cambia el manager/admin via
+// /api/derivar y /api/liberar) y "fechaCita" (cambiarla reinicia el ciclo
+// de recuperacion por SMS en _recuperacion.mts, asi que queda reservada
+// al manager/admin).
+const SUBGESTOR_ALLOWED_FIELDS = [
+  "nombre",
+  "telefono",
+  "direccion",
+  "idioma",
+  "notas",
   "estado",
   "pagoFecha",
   "pagoMonto",
@@ -85,10 +112,31 @@ export default async (req: Request, context: Context) => {
         const token = url.searchParams.get("token") || "";
         if (token) {
           const mgr = await findManagerByToken(token);
-          if (!mgr) return json({ error: "invalid_token" }, 401);
-          const allClients = await getAllClients();
-          const clients = allClients.filter((c: any) => c.manager === mgr.name);
-          return json({ role: "manager", managerName: mgr.name, clients });
+          if (mgr) {
+            const allClients = await getAllClients();
+            const clients = allClients.filter((c: any) => c.manager === mgr.name);
+            return json({
+              role: "manager",
+              managerName: mgr.name,
+              subgestores: mgr.subgestores || [],
+              clients,
+            });
+          }
+          // No es el link de ningun manager: probamos si es el link de un
+          // sub-gestor (segundo nivel de acceso, ve solo lo que tiene
+          // asignado dentro de la cartera de su manager).
+          const found = await findManagerAndSubgestorByToken(token);
+          if (found) {
+            const allClients = await getAllClients();
+            const clients = allClients.filter((c: any) => c.subgestorId === found.subgestor.id);
+            return json({
+              role: "subgestor",
+              subgestorName: found.subgestor.nombre,
+              managerName: found.manager.name,
+              clients,
+            });
+          }
+          return json({ error: "invalid_token" }, 401);
         }
         // Sin token = entrada del administrador (como funcionaba antes).
         // Ve a todos los managers (con su codigo de link, para poder
@@ -118,22 +166,73 @@ export default async (req: Request, context: Context) => {
         // puede tocar clientes de otro manager.
         if (token) {
           const mgr = await findManagerByToken(token);
-          if (!mgr) return json({ error: "invalid_token" }, 401);
-          if (!body.id) return json({ error: "managers_cannot_create" }, 403);
+          if (mgr) {
+            if (!body.id) return json({ error: "managers_cannot_create" }, 403);
+            const existing = await getClient(body.id);
+            if (!existing || existing.manager !== mgr.name) {
+              return json({ error: "not_found" }, 404);
+            }
+            const client = { ...existing };
+            for (const field of MANAGER_ALLOWED_FIELDS) {
+              if (field in body) client[field] = body[field];
+            }
+            if (pagoIncompleto(client)) {
+              return json({ error: "pago_incompleto" }, 400);
+            }
+            if ("estado" in body) client.resultadoRegistradoEn = Date.now();
+            // Guardamos el cambio de estado PRIMERO, antes de intentar mandar el
+            // SMS de recuperacion. Asi, aunque GoHighLevel tarde o falle, el
+            // cambio de estado del cliente nunca se pierde.
+            await saveClient(client);
+            await manejarTransicionNoAtendio(existing.estado, client);
+            if (client.recuperacionEnvios) await saveClient(client);
+            return json({ ok: true, client });
+          }
+
+          // ---- Un sub-gestor esta guardando desde SU link personal ----
+          // Solo puede tocar un cliente que tiene actualmente asignado
+          // (client.subgestorId === su id), pero a diferencia del manager
+          // si puede editar la ficha completa (nombre, telefono, direccion,
+          // idioma, notas) ademas del resultado de gestion.
+          const found = await findManagerAndSubgestorByToken(token);
+          if (!found) return json({ error: "invalid_token" }, 401);
+          if (!body.id) return json({ error: "subgestores_cannot_create" }, 403);
           const existing = await getClient(body.id);
-          if (!existing || existing.manager !== mgr.name) {
+          if (!existing || existing.subgestorId !== found.subgestor.id) {
             return json({ error: "not_found" }, 404);
           }
           const client = { ...existing };
-          for (const field of MANAGER_ALLOWED_FIELDS) {
+          for (const field of SUBGESTOR_ALLOWED_FIELDS) {
             if (field in body) client[field] = body[field];
           }
           if (pagoIncompleto(client)) {
             return json({ error: "pago_incompleto" }, 400);
           }
-          // Guardamos el cambio de estado PRIMERO, antes de intentar mandar el
-          // SMS de recuperacion. Asi, aunque GoHighLevel tarde o falle, el
-          // cambio de estado del cliente nunca se pierde.
+          // Mismo chequeo de duplicado "amplio" que usa el administrador
+          // cuando de verdad se esta tocando nombre/telefono/direccion, para
+          // que el sub-gestor no pueda cargar sin querer un duplicado.
+          if (body.nombre || body.telefono || body.direccion) {
+            const existingClients = await getAllClients();
+            const dupe = findDuplicateAmplio(
+              existingClients,
+              client.nombre,
+              client.telefono,
+              client.direccion,
+              body.id
+            );
+            if (dupe) {
+              return json(
+                {
+                  error: "duplicate_client",
+                  message: `No se puede, cliente duplicado en el manager ${dupe.manager}.`,
+                  managerName: dupe.manager,
+                  duplicateId: dupe.id,
+                },
+                409
+              );
+            }
+          }
+          if ("estado" in body) client.resultadoRegistradoEn = Date.now();
           await saveClient(client);
           await manejarTransicionNoAtendio(existing.estado, client);
           if (client.recuperacionEnvios) await saveClient(client);
@@ -155,6 +254,7 @@ export default async (req: Request, context: Context) => {
           if (!existing) return json({ error: "not_found" }, 404);
           estadoAntesDeGuardar = existing.estado;
           client = { ...existing, ...body };
+          if ("estado" in body) client.resultadoRegistradoEn = Date.now();
 
           // Solo revisamos duplicado si de verdad se esta tocando el nombre,
           // telefono o direccion (una edicion real de ficha), no en guardados
@@ -317,6 +417,151 @@ export default async (req: Request, context: Context) => {
       }
     }
 
+    if (path === "/api/subgestor") {
+      // Agregar/editar/eliminar sub-gestores: lo puede hacer el
+      // administrador (sin token) o el propio manager dueño (con su
+      // token). Un sub-gestor NUNCA puede administrar sub-gestores (ni los
+      // suyos ni los de nadie), aunque mande su propio token.
+      if (method === "POST") {
+        const body = await req.json();
+        const token = (body.token || "").toString().trim();
+        let managerName: string;
+        if (token) {
+          const mgr = await findManagerByToken(token);
+          if (!mgr) {
+            const asSubgestor = await findManagerAndSubgestorByToken(token);
+            if (asSubgestor) return json({ error: "forbidden" }, 403);
+            return json({ error: "invalid_token" }, 401);
+          }
+          managerName = mgr.name;
+        } else {
+          managerName = (body.managerName || "").toString().trim();
+          if (!managerName) return json({ error: "missing_manager_name" }, 400);
+        }
+
+        if (body.id) {
+          const nombre = "nombre" in body ? (body.nombre || "").toString().trim() : undefined;
+          const telefono = "telefono" in body ? (body.telefono || "").toString().trim() : undefined;
+          const result = await updateSubgestor(managerName, body.id, { nombre, telefono });
+          if (!result.ok) return json({ error: result.error }, 404);
+          return json({ ok: true, subgestor: result.subgestor });
+        }
+
+        const nombre = (body.nombre || "").toString().trim();
+        if (!nombre) return json({ error: "missing_nombre" }, 400);
+        const telefono = (body.telefono || "").toString().trim();
+        const result = await addSubgestor(managerName, nombre, telefono);
+        if (!result.ok) return json({ error: result.error }, 404);
+        return json({ ok: true, subgestor: result.subgestor });
+      }
+      if (method === "DELETE") {
+        const token = url.searchParams.get("token") || "";
+        let managerName: string;
+        if (token) {
+          const mgr = await findManagerByToken(token);
+          if (!mgr) {
+            const asSubgestor = await findManagerAndSubgestorByToken(token);
+            if (asSubgestor) return json({ error: "forbidden" }, 403);
+            return json({ error: "invalid_token" }, 401);
+          }
+          managerName = mgr.name;
+        } else {
+          managerName = url.searchParams.get("managerName") || "";
+          if (!managerName) return json({ error: "missing_manager_name" }, 400);
+        }
+        const id = url.searchParams.get("id") || "";
+        if (!id) return json({ error: "missing_id" }, 400);
+        const ok = await deleteSubgestor(managerName, id);
+        if (!ok) return json({ error: "not_found" }, 404);
+
+        // Ningun cliente puede quedar "atascado" apuntando a un sub-gestor
+        // que ya no existe: liberamos automaticamente a todos los que lo
+        // tuvieran asignado.
+        const clients = await getAllClients();
+        for (const c of clients) {
+          if (c.subgestorId === id) {
+            c.subgestorId = "";
+            c.subgestorNombre = "";
+            c.derivadoEn = 0;
+            c.resultadoRegistradoEn = 0;
+            await saveClient(c);
+          }
+        }
+        return json({ ok: true });
+      }
+    }
+
+    if (path === "/api/derivar" && method === "POST") {
+      // Deriva un cliente a un sub-gestor especifico. Lo puede hacer el
+      // administrador o el manager dueño de ese cliente. Un cliente NUNCA
+      // puede quedar derivado a dos sub-gestores a la vez: si ya tiene uno
+      // asignado, hay que liberarlo primero (/api/liberar) antes de poder
+      // reasignarlo.
+      const body = await req.json();
+      const token = (body.token || "").toString().trim();
+      const clientId = (body.clientId || "").toString().trim();
+      const subgestorId = (body.subgestorId || "").toString().trim();
+      if (!clientId || !subgestorId) return json({ error: "missing_fields" }, 400);
+
+      const existing = await getClient(clientId);
+      if (!existing) return json({ error: "not_found" }, 404);
+
+      let managerName = existing.manager;
+      if (token) {
+        const mgr = await findManagerByToken(token);
+        if (!mgr) return json({ error: "invalid_token" }, 401);
+        if (existing.manager !== mgr.name) return json({ error: "not_found" }, 404);
+        managerName = mgr.name;
+      }
+
+      const sub = await findSubgestorById(managerName, subgestorId);
+      if (!sub) return json({ error: "not_found" }, 404);
+
+      if (existing.subgestorId) {
+        return json(
+          {
+            error: "ya_derivada",
+            message: "Esta cita ya está derivada a otro sub-gestor. Liberala primero para poder reasignarla.",
+          },
+          409
+        );
+      }
+
+      const client = { ...existing };
+      client.subgestorId = sub.id;
+      client.subgestorNombre = sub.nombre;
+      client.derivadoEn = Date.now();
+      client.resultadoRegistradoEn = 0;
+      await saveClient(client);
+      return json({ ok: true, client });
+    }
+
+    if (path === "/api/liberar" && method === "POST") {
+      // Libera un cliente derivado (le quita la asignacion de sub-gestor).
+      // Lo puede hacer el administrador o el manager dueño de ese cliente.
+      const body = await req.json();
+      const token = (body.token || "").toString().trim();
+      const clientId = (body.clientId || "").toString().trim();
+      if (!clientId) return json({ error: "missing_fields" }, 400);
+
+      const existing = await getClient(clientId);
+      if (!existing) return json({ error: "not_found" }, 404);
+
+      if (token) {
+        const mgr = await findManagerByToken(token);
+        if (!mgr) return json({ error: "invalid_token" }, 401);
+        if (existing.manager !== mgr.name) return json({ error: "not_found" }, 404);
+      }
+
+      const client = { ...existing };
+      client.subgestorId = "";
+      client.subgestorNombre = "";
+      client.derivadoEn = 0;
+      client.resultadoRegistradoEn = 0;
+      await saveClient(client);
+      return json({ ok: true, client });
+    }
+
     if (path === "/api/backups") {
       const s = store();
       if (url.searchParams.get("token")) return json({ error: "forbidden" }, 403);
@@ -431,5 +676,15 @@ export default async (req: Request, context: Context) => {
 };
 
 export const config: Config = {
-  path: ["/api/data", "/api/client", "/api/manager", "/api/backups", "/api/backups/restore", "/api/parse"],
+  path: [
+    "/api/data",
+    "/api/client",
+    "/api/manager",
+    "/api/subgestor",
+    "/api/derivar",
+    "/api/liberar",
+    "/api/backups",
+    "/api/backups/restore",
+    "/api/parse",
+  ],
 };

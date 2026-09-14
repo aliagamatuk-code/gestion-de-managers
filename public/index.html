@@ -87,6 +87,31 @@
     color:var(--danger);padding:2px 8px;border-radius:20px;font-weight:600;}
   .clientcard.vencido{border-color:var(--danger);background:#FDF2F0;}
   .clientcard.vencido .cname{color:var(--danger);}
+  /* Cita derivada a un sub-gestor hace mas de 24h sin resultado: alerta
+     ambar, deliberadamente distinta del rojo de "vencido" (son dos avisos
+     distintos y no hay que confundirlos). */
+  .derivflag{display:inline-block;margin-top:6px;font-size:11px;background:#FCEFD8;
+    color:var(--warn);padding:2px 8px;border-radius:20px;font-weight:600;}
+  .clientcard.alertaderiv{border-color:var(--warn);}
+  .asigwrap{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:8px;}
+  .asignadoflag{font-size:11px;padding:3px 9px;border-radius:20px;background:var(--teal-light);
+    color:var(--teal-dark);font-weight:600;}
+  .sinasignarflag{font-size:11px;padding:3px 9px;border-radius:20px;background:#F0F2F3;
+    color:var(--muted);font-weight:600;}
+
+  /* Sub-gestores */
+  .sgsection{margin-top:10px;margin-bottom:6px;padding:10px;border:1px dashed var(--line);border-radius:12px;}
+  .sghead{display:flex;align-items:center;gap:8px;margin-bottom:6px;}
+  .sghead b{font-size:13px;flex:1;}
+  .sghead span{font-size:11px;color:var(--muted);}
+  .sgrow{display:flex;align-items:center;justify-content:space-between;gap:8px;
+    padding:6px 0;border-bottom:1px solid var(--line);font-size:12.5px;}
+  .sgrow:last-child{border-bottom:none;}
+
+  /* Citas de hoy */
+  .citahoyrow{font-size:12.5px;padding:7px 0;border-bottom:1px solid var(--line);}
+  .citahoyrow:last-child{border-bottom:none;}
+  .citahoyrow.sinasignar{color:var(--muted);}
   .statusrow{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px;}
   .statuspill{font-size:11px;padding:5px 9px;border-radius:20px;border:1.5px solid var(--line);
     background:#fff;color:var(--muted);cursor:pointer;font-weight:600;}
