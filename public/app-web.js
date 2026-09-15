@@ -865,15 +865,20 @@ function confirmLiberar(c){
 }
 
 /* ===================== CITAS DE HOY (vista del manager) ===================== */
-function renderCitasHoy(clients){
+// Una cita "es de hoy" cuando su fechaCita cae en el dia calendario de
+// hoy (comparando fecha local, no hora). Si no se pudo leer la fecha,
+// no cuenta como de hoy (mismo criterio que isVencidoPendiente).
+function esCitaHoy(c){
+  const dt = parseFechaCita(c.fechaCita);
+  if(!dt) return false;
   const hoy = todayStr();
+  const ds = dt.getFullYear()+"-"+String(dt.getMonth()+1).padStart(2,"0")+"-"+String(dt.getDate()).padStart(2,"0");
+  return ds === hoy;
+}
+
+function renderCitasHoy(clients){
   const citas = clients
-    .filter(c => {
-      const dt = parseFechaCita(c.fechaCita);
-      if(!dt) return false;
-      const ds = dt.getFullYear()+"-"+String(dt.getMonth()+1).padStart(2,"0")+"-"+String(dt.getDate()).padStart(2,"0");
-      return ds === hoy;
-    })
+    .filter(esCitaHoy)
     .sort((a,b) => parseFechaCita(a.fechaCita) - parseFechaCita(b.fechaCita));
 
   const box = document.createElement("div");
@@ -1534,7 +1539,28 @@ function renderSubgestorClientList(){
   if(STATE.clients.length === 0){
     list.innerHTML = `<div class="emptynote">Todavía no tenés clientes asignados.</div>`;
   } else {
-    STATE.clients.forEach(c => list.appendChild(renderClientCard(c)));
+    // Las citas de HOY van primero, en orden por hora (la mas temprana
+    // arriba), separadas con su propio titulo para que queden bien
+    // destacadas. El resto del historial queda despues, con su propio
+    // titulo, en el orden en que ya venia.
+    const deHoy = STATE.clients.filter(esCitaHoy).sort((a,b) => parseFechaCita(a.fechaCita) - parseFechaCita(b.fechaCita));
+    const resto = STATE.clients.filter(c => !esCitaHoy(c));
+    if(deHoy.length > 0){
+      const hoyTitle = document.createElement("div");
+      hoyTitle.className = "listsubtitle";
+      hoyTitle.textContent = `📅 Hoy (${deHoy.length})`;
+      list.appendChild(hoyTitle);
+      deHoy.forEach(c => list.appendChild(renderClientCard(c)));
+    }
+    if(resto.length > 0){
+      if(deHoy.length > 0){
+        const restoTitle = document.createElement("div");
+        restoTitle.className = "listsubtitle";
+        restoTitle.textContent = "Historial";
+        list.appendChild(restoTitle);
+      }
+      resto.forEach(c => list.appendChild(renderClientCard(c)));
+    }
   }
   wrap.appendChild(list);
   return wrap;
