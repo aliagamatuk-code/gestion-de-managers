@@ -962,6 +962,29 @@ function dayLabel(dateStr){
 }
 function minutesOfDay(dt){ return dt.getHours()*60 + dt.getMinutes(); }
 
+// Slots fijos de 30 minutos entre CAL_START_MIN y CAL_END_MIN (8:00 a
+// 21:00 -> 27 filas), usados SOLO por la lista de "Mi horario" del manager.
+function buildTimeSlots(){
+  const slots = [];
+  for(let m = CAL_START_MIN; m <= CAL_END_MIN; m += 30) slots.push(m);
+  return slots;
+}
+// A que slot de 30min pertenece una cita: se redondea hacia abajo al slot
+// en el que cae (ej. 9:45 -> fila de las 9:30). Una cita antes de las 8am o
+// despues de las 9pm se "pega" al primer/ultimo slot en vez de perderse.
+function slotForMinutes(mins){
+  const clamped = Math.max(CAL_START_MIN, Math.min(CAL_END_MIN, mins));
+  return Math.floor((clamped - CAL_START_MIN) / 30) * 30 + CAL_START_MIN;
+}
+function formatSlotLabel(mins){
+  const h24 = Math.floor(mins / 60);
+  const m = mins % 60;
+  const ampm = h24 < 12 ? "am" : "pm";
+  let h12 = h24 % 12;
+  if(h12 === 0) h12 = 12;
+  return h12 + ":" + String(m).padStart(2, "0") + " " + ampm;
+}
+
 // Citas de un manager en un dia especifico, ya parseadas y ordenadas por
 // hora. "source" es la lista de clientes donde buscar (STATE.clients: para
 // el admin trae a todo el mundo, para un manager el backend ya se lo filtro
@@ -1118,12 +1141,88 @@ function renderCalendarioGeneral(){
   return renderCalendarStrip("📅 Calendario General de Managers", names);
 }
 
-// Vista del manager (entra por su link personal): una sola fila, la suya.
+// Vista del manager (entra por su link personal): lista tipo hoja de
+// calculo, una fila fija por cada media hora de 8:00 a 21:00 (con huecos
+// vacios visibles), en vez del formato de barras del Calendario General.
 // STATE.clients ya viene filtrado por el backend a solo sus propios
 // clientes, asi que nunca puede ver la agenda de otro manager desde aqui.
 function renderMiHorario(){
+  return renderMiHorarioLista();
+}
+
+function renderMiHorarioLista(){
   if(!calendarStart) calendarStart = todayStr();
-  return renderCalendarStrip("📅 Mi horario — " + CURRENT_USER.name, [CURRENT_USER.name]);
+  const wrap = document.createElement("div");
+  wrap.className = "calendarWrap";
+
+  const toolbar = document.createElement("div");
+  toolbar.className = "toolbar calToolbar";
+  const backBtn = document.createElement("button");
+  backBtn.className = "toolbtn";
+  backBtn.textContent = "⬅ Volver";
+  backBtn.onclick = () => { calendarOpen = false; render(); };
+  const nextBtn = document.createElement("button");
+  nextBtn.className = "toolbtn";
+  nextBtn.textContent = "Ver siguientes ▶";
+  nextBtn.onclick = () => { calendarStart = addDaysStr(calendarStart, 3); render(); };
+  toolbar.appendChild(backBtn);
+  toolbar.appendChild(nextBtn);
+  wrap.appendChild(toolbar);
+
+  const h = document.createElement("h3");
+  h.style.cssText = "margin:0 0 10px;font-size:14px;";
+  h.textContent = "📅 Mi horario — " + CURRENT_USER.name;
+  wrap.appendChild(h);
+
+  const days = buildDayWindow(calendarStart, 3);
+  const slots = buildTimeSlots();
+
+  const cols = document.createElement("div");
+  cols.className = "miHorarioCols";
+
+  days.forEach(dayStr => {
+    const items = clientsForManagerDay(CURRENT_USER.name, dayStr, STATE.clients);
+    const bySlot = new Map();
+    items.forEach(it => {
+      const slot = slotForMinutes(minutesOfDay(it.dt));
+      if(!bySlot.has(slot)) bySlot.set(slot, []);
+      bySlot.get(slot).push(it);
+    });
+
+    const col = document.createElement("div");
+    col.className = "miHorarioCol";
+    const colHead = document.createElement("div");
+    colHead.className = "miHorarioColHead";
+    colHead.textContent = dayLabel(dayStr);
+    col.appendChild(colHead);
+
+    slots.forEach(slotMin => {
+      const row = document.createElement("div");
+      row.className = "miHorarioSlot";
+      const timeEl = document.createElement("span");
+      timeEl.className = "miHorarioTime";
+      timeEl.textContent = formatSlotLabel(slotMin);
+      row.appendChild(timeEl);
+
+      const entryWrap = document.createElement("div");
+      entryWrap.className = "miHorarioEntries";
+      const entries = bySlot.get(slotMin) || [];
+      entries.forEach(it => {
+        const entry = document.createElement("div");
+        entry.className = "miHorarioEntry";
+        entry.innerHTML = `${esc(it.c.nombre)}<span class="miHorarioCity">${esc(cityFromDireccion(it.c.direccion))}</span>`;
+        entry.onclick = () => openClientDetailModal(it.c);
+        entryWrap.appendChild(entry);
+      });
+      row.appendChild(entryWrap);
+      col.appendChild(row);
+    });
+
+    cols.appendChild(col);
+  });
+
+  wrap.appendChild(cols);
+  return wrap;
 }
 
 /* ===================== CLIENT CARD ===================== */
