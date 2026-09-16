@@ -42,6 +42,7 @@ let CURRENT_USER = null;   // {type:'admin'} or {type:'manager', name:'...', tok
 let openCards = new Set();
 let calendarOpen = false;  // si se esta mostrando "Calendario General" (admin) / "Mi horario" (manager)
 let calendarStart = null;  // "yyyy-mm-dd" del primer dia visible de la ventana de 3 dias
+let calendarManagerView = null; // nombre del manager cuyo horario individual esta viendo el admin, o null
 
 /* ===================== STORAGE HELPERS (real backend via /api) ===================== */
 async function loadShared(token){
@@ -409,6 +410,8 @@ function render(){
   if(CURRENT_USER.type === "admin"){
     if(calendarOpen){
       app.appendChild(renderCalendarioGeneral());
+    } else if(calendarManagerView){
+      app.appendChild(renderManagerHorarioLista(calendarManagerView));
     } else {
       app.appendChild(renderAdminToolbar());
       app.appendChild(renderSummary());
@@ -626,12 +629,18 @@ const head = document.createElement("div");
   head.innerHTML = `
   <div class="donut" style="${donutStyle(clients)}"></div>
   <div class="info"><b>${managerName}</b><span>${clients.length} cliente${clients.length===1?"":"s"}</span></div>
+  ${token ? '<button class="miniBtn" data-x="horario" title="Ver horario (huecos libres por dia)" style="margin-right:4px;">🗓️</button>' : ''}
   ${token ? '<button class="miniBtn" data-x="rename" title="Renombrar manager" style="margin-right:4px;">✏️</button>' : ''}
   ${token ? '<button class="miniBtn" data-x="link" title="Copiar link personal" style="margin-right:4px;">🔗</button>' : ''}
   ${token ? '<button class="miniBtn" data-x="revoke" title="Generar link nuevo (corta el acceso al anterior)" style="margin-right:4px;">🔁</button>' : ''}
   ${collapsible ? '<div class="chev">▾</div>' : ''}
   `;
   if(token){
+    head.querySelector('[data-x="horario"]').onclick = (ev) => {
+      ev.stopPropagation();
+      calendarManagerView = managerName;
+      render();
+    };
     head.querySelector('[data-x="rename"]').onclick = (ev) => {
       ev.stopPropagation();
       openRenameManagerModal(managerName);
@@ -1147,10 +1156,32 @@ function renderCalendarioGeneral(){
 // STATE.clients ya viene filtrado por el backend a solo sus propios
 // clientes, asi que nunca puede ver la agenda de otro manager desde aqui.
 function renderMiHorario(){
-  return renderMiHorarioLista();
+  return renderHorarioLista(
+    CURRENT_USER.name,
+    "📅 Mi horario — " + CURRENT_USER.name,
+    () => { calendarOpen = false; render(); }
+  );
 }
 
-function renderMiHorarioLista(){
+// Vista del administrador: el mismo formato de lista de "Mi horario", pero
+// para UN manager puntual (el que Omar elija con el boton 🗓️ de su
+// tarjeta), para comparar huecos libres entre managers y decidir a quien
+// asignar clientes nuevos. STATE.clients trae a TODOS los clientes (vista
+// admin), pero clientsForManagerDay ya filtra por managerName, asi que solo
+// se muestran las citas de ese manager puntual.
+function renderManagerHorarioLista(managerName){
+  return renderHorarioLista(
+    managerName,
+    "📅 Horario — " + managerName,
+    () => { calendarManagerView = null; render(); }
+  );
+}
+
+// Componente compartido por renderMiHorario() y renderManagerHorarioLista():
+// lista de 3 dias x 27 filas de horario (8:00am-9:00pm, cada 30min) para UN
+// solo manager. "onBack" decide a donde vuelve el boton "Volver" (a la
+// vista normal del manager, o a la lista de managers del admin).
+function renderHorarioLista(managerName, title, onBack){
   if(!calendarStart) calendarStart = todayStr();
   const wrap = document.createElement("div");
   wrap.className = "calendarWrap";
@@ -1160,7 +1191,7 @@ function renderMiHorarioLista(){
   const backBtn = document.createElement("button");
   backBtn.className = "toolbtn";
   backBtn.textContent = "⬅ Volver";
-  backBtn.onclick = () => { calendarOpen = false; render(); };
+  backBtn.onclick = onBack;
   const nextBtn = document.createElement("button");
   nextBtn.className = "toolbtn";
   nextBtn.textContent = "Ver siguientes ▶";
@@ -1171,7 +1202,7 @@ function renderMiHorarioLista(){
 
   const h = document.createElement("h3");
   h.style.cssText = "margin:0 0 10px;font-size:14px;";
-  h.textContent = "📅 Mi horario — " + CURRENT_USER.name;
+  h.textContent = title;
   wrap.appendChild(h);
 
   const days = buildDayWindow(calendarStart, 3);
@@ -1181,7 +1212,7 @@ function renderMiHorarioLista(){
   cols.className = "miHorarioCols";
 
   days.forEach(dayStr => {
-    const items = clientsForManagerDay(CURRENT_USER.name, dayStr, STATE.clients);
+    const items = clientsForManagerDay(managerName, dayStr, STATE.clients);
     const bySlot = new Map();
     items.forEach(it => {
       const slot = slotForMinutes(minutesOfDay(it.dt));
