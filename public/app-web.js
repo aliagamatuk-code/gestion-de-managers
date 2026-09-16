@@ -15,6 +15,18 @@ const ESTADO_COLOR = {
 // de estos estados, cuya fecha de cita ya paso, se considera "vencido
 // y pendiente de completar informacion de gestion".
 const ESTADOS_PENDIENTES_GESTION = ["Activo","Pendiente"];
+// Paleta fija para el Calendario General / Mi horario: cada manager recibe
+// SIEMPRE el mismo color (segun su posicion en STATE.managers), para poder
+// distinguir de un vistazo a que manager pertenece cada bloque de cita.
+const MANAGER_PALETTE = [
+  "#2E6FC4","#C4472B","#1E8A5A","#7B4FC9","#D98B1F","#0E7C86","#8D6346",
+  "#C2185B","#455A64","#6D4C41","#00897B","#5E35B1","#EF6C00","#3949AB"
+];
+// Rango visible de la franja de horario (8:00am a 9:00pm) y duracion fija
+// asumida por cita (no hay campo de duracion en los datos).
+const CAL_START_MIN = 8*60;
+const CAL_END_MIN = 21*60;
+const CAL_BLOCK_MIN = 60;
 const LOCK_KEY = "gestion-managers-device-lock";
 // Guarda el codigo secreto del link personal de un manager en este
 // dispositivo, para que no tenga que volver a tocar el link cada vez
@@ -28,6 +40,8 @@ const VEINTICUATRO_HORAS_MS = 24*60*60*1000;
 let STATE = null;          // {managers:[], clients:[]}
 let CURRENT_USER = null;   // {type:'admin'} or {type:'manager', name:'...', token:'...'}
 let openCards = new Set();
+let calendarOpen = false;  // si se esta mostrando "Calendario General" (admin) / "Mi horario" (manager)
+let calendarStart = null;  // "yyyy-mm-dd" del primer dia visible de la ventana de 3 dias
 
 /* ===================== STORAGE HELPERS (real backend via /api) ===================== */
 async function loadShared(token){
@@ -393,13 +407,21 @@ function render(){
   const app = document.createElement("div");
   app.className = "app";
   if(CURRENT_USER.type === "admin"){
-    app.appendChild(renderAdminToolbar());
-    app.appendChild(renderSummary());
-    STATE.managers.forEach(m => app.appendChild(renderManagerCard(m.name, true, m.token)));
+    if(calendarOpen){
+      app.appendChild(renderCalendarioGeneral());
+    } else {
+      app.appendChild(renderAdminToolbar());
+      app.appendChild(renderSummary());
+      STATE.managers.forEach(m => app.appendChild(renderManagerCard(m.name, true, m.token)));
+    }
   } else if(CURRENT_USER.type === "manager"){
-    app.appendChild(renderManagerToolbar());
-    app.appendChild(renderCitasHoy(STATE.clients));
-    app.appendChild(renderManagerCard(CURRENT_USER.name, false, null));
+    if(calendarOpen){
+      app.appendChild(renderMiHorario());
+    } else {
+      app.appendChild(renderManagerToolbar());
+      app.appendChild(renderCitasHoy(STATE.clients));
+      app.appendChild(renderManagerCard(CURRENT_USER.name, false, null));
+    }
   } else {
     app.appendChild(renderSubgestorToolbar());
     app.appendChild(renderSubgestorClientList());
@@ -897,6 +919,211 @@ function renderCitasHoy(clients){
   });
   box.innerHTML = `<h3>📅 Citas de hoy (${citas.length})</h3>${rows}`;
   return box;
+}
+
+/* ===================== CALENDARIO GENERAL / MI HORARIO ===================== */
+// Color fijo por manager: siempre el mismo, segun su posicion dentro de
+// STATE.managers (los managers nuevos se agregan al final de la lista, asi
+// que el color de uno ya existente nunca cambia). Un manager que entra por
+// su propio link solo tiene su propio registro en STATE.managers (posicion
+// 0), asi que ve su franja con el primer color de la paleta: no importa,
+// porque en su vista nunca hay otro manager con el que compararlo.
+function managerColor(name){
+  const idx = STATE.managers.findIndex(m => m.name === name);
+  return MANAGER_PALETTE[(idx >= 0 ? idx : 0) % MANAGER_PALETTE.length];
+}
+
+// La direccion es texto libre (viene de contact.full_address de GHL, ej.
+// "123 Main St, Reading, PA 19601"). No existe un campo "ciudad" separado,
+// asi que se toma el segundo segmento separado por comas. Si no hay
+// suficientes comas para confiar en el resultado, se muestra la direccion
+// completa en vez de arriesgarse a mostrar algo que no es la ciudad.
+function cityFromDireccion(direccion){
+  if(!direccion) return "";
+  const parts = direccion.toString().split(",").map(s => s.trim()).filter(Boolean);
+  return parts.length >= 2 ? parts[1] : direccion;
+}
+
+function addDaysStr(dateStr, n){
+  const [y,m,d] = dateStr.split("-").map(Number);
+  const dt = new Date(y, m-1, d);
+  dt.setDate(dt.getDate() + n);
+  return dt.getFullYear()+"-"+String(dt.getMonth()+1).padStart(2,"0")+"-"+String(dt.getDate()).padStart(2,"0");
+}
+function buildDayWindow(startStr, n){
+  const days = [];
+  for(let i=0;i<n;i++) days.push(addDaysStr(startStr, i));
+  return days;
+}
+function dayLabel(dateStr){
+  const [y,m,d] = dateStr.split("-").map(Number);
+  const dt = new Date(y, m-1, d);
+  return dt.toLocaleDateString("es", {weekday:"short", day:"numeric", month:"short"});
+}
+function minutesOfDay(dt){ return dt.getHours()*60 + dt.getMinutes(); }
+
+// Citas de un manager en un dia especifico, ya parseadas y ordenadas por
+// hora. "source" es la lista de clientes donde buscar (STATE.clients: para
+// el admin trae a todo el mundo, para un manager el backend ya se lo filtro
+// a solo los suyos, asi que no hace falta filtrar de nuevo aqui).
+function clientsForManagerDay(managerName, dayStr, source){
+  return source
+    .filter(c => c.manager === managerName)
+    .map(c => ({ c, dt: parseFechaCita(c.fechaCita) }))
+    .filter(x => x.dt)
+    .filter(x => {
+      const ds = x.dt.getFullYear()+"-"+String(x.dt.getMonth()+1).padStart(2,"0")+"-"+String(x.dt.getDate()).padStart(2,"0");
+      return ds === dayStr;
+    })
+    .sort((a,b) => a.dt - b.dt);
+}
+
+// Calcula, para un grupo de citas de un mismo manager+dia (ya ordenadas por
+// hora), en que "columna" angosta va cada una cuando se solapan con otras
+// (misma hora o rango de 60min cruzado), para dibujarlas lado a lado en vez
+// de apiladas. Devuelve un array paralelo a "items" con {colIndex, colCount}.
+function layoutOverlaps(items){
+  const n = items.length;
+  const result = items.map(() => ({colIndex:0, colCount:1}));
+  if(n === 0) return result;
+  const starts = items.map(x => x.dt.getTime());
+  const ends = starts.map(s => s + CAL_BLOCK_MIN*60000);
+
+  function assignCluster(from, to){
+    const colEndTimes = [];
+    for(let i=from;i<to;i++){
+      let col = colEndTimes.findIndex(e => e <= starts[i]);
+      if(col === -1){ col = colEndTimes.length; colEndTimes.push(ends[i]); }
+      else { colEndTimes[col] = ends[i]; }
+      result[i].colIndex = col;
+    }
+    const colCount = colEndTimes.length;
+    for(let i=from;i<to;i++) result[i].colCount = colCount;
+  }
+
+  let clusterStart = 0;
+  let clusterMaxEnd = ends[0];
+  for(let i=1;i<=n;i++){
+    if(i === n || starts[i] >= clusterMaxEnd){
+      assignCluster(clusterStart, i);
+      if(i < n){ clusterStart = i; clusterMaxEnd = ends[i]; }
+    } else {
+      clusterMaxEnd = Math.max(clusterMaxEnd, ends[i]);
+    }
+  }
+  return result;
+}
+
+// Abre la ficha completa del cliente (la misma tarjeta que se usa en la
+// lista normal, con los mismos permisos segun el rol) dentro de un modal,
+// para poder gestionarla sin salir de la vista de calendario.
+function openClientDetailModal(c){
+  const body = document.createElement("div");
+  body.className = "modalhead";
+  const closeBtn = document.createElement("button");
+  closeBtn.className = "closeX";
+  closeBtn.textContent = "✕";
+  body.appendChild(closeBtn);
+  body.appendChild(renderClientCard(c));
+  const close = showModal(body);
+  closeBtn.onclick = close;
+}
+
+// Componente compartido: dibuja la franja de horario (3 dias visibles,
+// "Ver siguientes" desliza la ventana de a 3) para la lista de managers que
+// se le pase. Con un solo nombre (vista del manager) dibuja una sola fila.
+function renderCalendarStrip(title, managerNames){
+  const wrap = document.createElement("div");
+  wrap.className = "calendarWrap";
+
+  const toolbar = document.createElement("div");
+  toolbar.className = "toolbar calToolbar";
+  const backBtn = document.createElement("button");
+  backBtn.className = "toolbtn";
+  backBtn.textContent = "⬅ Volver";
+  backBtn.onclick = () => { calendarOpen = false; render(); };
+  const nextBtn = document.createElement("button");
+  nextBtn.className = "toolbtn";
+  nextBtn.textContent = "Ver siguientes ▶";
+  nextBtn.onclick = () => { calendarStart = addDaysStr(calendarStart, 3); render(); };
+  toolbar.appendChild(backBtn);
+  toolbar.appendChild(nextBtn);
+  wrap.appendChild(toolbar);
+
+  const h = document.createElement("h3");
+  h.style.cssText = "margin:0 0 10px;font-size:14px;";
+  h.textContent = title;
+  wrap.appendChild(h);
+
+  const days = buildDayWindow(calendarStart, 3);
+
+  const gridOuter = document.createElement("div");
+  gridOuter.className = "calGridOuter";
+  const grid = document.createElement("div");
+  grid.className = "calGrid";
+  grid.style.gridTemplateColumns = "110px repeat(" + days.length + ", minmax(105px,1fr))";
+
+  const corner = document.createElement("div");
+  corner.className = "calCorner";
+  grid.appendChild(corner);
+  days.forEach(d => {
+    const dh = document.createElement("div");
+    dh.className = "calDayHead";
+    dh.textContent = dayLabel(d);
+    grid.appendChild(dh);
+  });
+
+  managerNames.forEach(name => {
+    const nameCell = document.createElement("div");
+    nameCell.className = "calMgrName";
+    nameCell.innerHTML = `<span class="calSwatch" style="background:${managerColor(name)}"></span>${esc(name)}`;
+    grid.appendChild(nameCell);
+
+    days.forEach(dayStr => {
+      const cell = document.createElement("div");
+      cell.className = "calCell";
+      const items = clientsForManagerDay(name, dayStr, STATE.clients);
+      const layout = layoutOverlaps(items);
+      items.forEach((it, i) => {
+        const {colIndex, colCount} = layout[i];
+        const mins = minutesOfDay(it.dt);
+        const topPct = ((mins - CAL_START_MIN) / (CAL_END_MIN - CAL_START_MIN)) * 100;
+        const heightPct = (CAL_BLOCK_MIN / (CAL_END_MIN - CAL_START_MIN)) * 100;
+        const block = document.createElement("div");
+        block.className = "calBlock";
+        block.style.top = topPct + "%";
+        block.style.height = heightPct + "%";
+        block.style.left = (colIndex * 100 / colCount) + "%";
+        block.style.width = (100 / colCount) + "%";
+        block.style.background = managerColor(name);
+        block.innerHTML = `${esc(it.c.nombre)}<span class="calCity">${esc(cityFromDireccion(it.c.direccion))}</span>`;
+        block.onclick = () => openClientDetailModal(it.c);
+        cell.appendChild(block);
+      });
+      grid.appendChild(cell);
+    });
+  });
+
+  gridOuter.appendChild(grid);
+  wrap.appendChild(gridOuter);
+  return wrap;
+}
+
+// Vista del administrador: una fila por CADA manager (las citas derivadas a
+// un sub-gestor, o reasignadas a otro manager, aparecen solas bajo el
+// nombre del manager dueño ACTUAL, porque client.manager ya refleja eso).
+function renderCalendarioGeneral(){
+  if(!calendarStart) calendarStart = todayStr();
+  const names = STATE.managers.map(m => m.name).sort((a,b) => a.localeCompare(b));
+  return renderCalendarStrip("📅 Calendario General de Managers", names);
+}
+
+// Vista del manager (entra por su link personal): una sola fila, la suya.
+// STATE.clients ya viene filtrado por el backend a solo sus propios
+// clientes, asi que nunca puede ver la agenda de otro manager desde aqui.
+function renderMiHorario(){
+  if(!calendarStart) calendarStart = todayStr();
+  return renderCalendarStrip("📅 Mi horario — " + CURRENT_USER.name, [CURRENT_USER.name]);
 }
 
 /* ===================== CLIENT CARD ===================== */
@@ -1462,6 +1689,7 @@ function renderAdminToolbar(){
   box.innerHTML = `
   <button class="toolbtn" id="tbRefresh">🔄 Actualizar ahora</button>
   <button class="toolbtn" id="tbAddMgr">➕ Agregar manager</button>
+  <button class="toolbtn" id="tbCalendar">📅 Calendario General</button>
   <button class="toolbtn" id="tbExport">⬇️ Exportar Excel</button>
   <button class="toolbtn" id="tbBackup">🗄️ Respaldos</button>
   `;
@@ -1478,6 +1706,11 @@ function renderAdminToolbar(){
     render();
   };
   box.querySelector("#tbAddMgr").onclick = openAddManagerModal;
+  box.querySelector("#tbCalendar").onclick = () => {
+    calendarOpen = true;
+    if(!calendarStart) calendarStart = todayStr();
+    render();
+  };
   box.querySelector("#tbExport").onclick = exportExcel;
   box.querySelector("#tbBackup").onclick = openBackupModal;
   return box;
@@ -1489,6 +1722,7 @@ function renderManagerToolbar(){
   box.className = "toolbar";
   box.innerHTML = `
   <button class="toolbtn" id="tbRefresh">🔄 Actualizar ahora</button>
+  <button class="toolbtn" id="tbCalendar">📅 Mi horario</button>
   <button class="toolbtn" id="tbExport">⬇️ Exportar mi Excel</button>
   `;
   box.querySelector("#tbRefresh").onclick = async (e) => {
@@ -1499,6 +1733,11 @@ function renderManagerToolbar(){
     if(fresh && !fresh.error && fresh.role === "manager"){
       STATE.clients = fresh.clients || [];
     }
+    render();
+  };
+  box.querySelector("#tbCalendar").onclick = () => {
+    calendarOpen = true;
+    if(!calendarStart) calendarStart = todayStr();
     render();
   };
   box.querySelector("#tbExport").onclick = exportMyExcel;

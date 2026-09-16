@@ -137,6 +137,25 @@
 
   .emptynote{font-size:12.5px;color:var(--muted);padding:10px 2px;}
 
+  /* Calendario General / Mi horario */
+  .calendarWrap{margin-bottom:14px;}
+  .calToolbar{margin-bottom:10px;}
+  .calGridOuter{overflow-x:auto;background:var(--card);border:1px solid var(--line);
+    border-radius:var(--radius);padding:10px;}
+  .calGrid{display:grid;gap:4px;min-width:480px;}
+  .calCorner{}
+  .calDayHead{font-size:11.5px;font-weight:700;color:var(--teal-dark);text-align:center;
+    padding:4px 2px;text-transform:capitalize;}
+  .calMgrName{font-size:12px;font-weight:600;display:flex;align-items:center;gap:6px;
+    padding:4px 4px;border-top:1px solid var(--line);}
+  .calSwatch{width:10px;height:10px;border-radius:50%;flex:none;}
+  .calCell{position:relative;height:170px;background:#FBFCFC;border:1px solid var(--line);
+    border-radius:8px;border-top:1px solid var(--line);overflow:visible;}
+  .calBlock{position:absolute;box-sizing:border-box;border:1px solid #fff;border-radius:6px;
+    color:#fff;font-size:10px;line-height:1.25;font-weight:600;padding:2px 4px;overflow:hidden;
+    cursor:pointer;}
+  .calBlock .calCity{display:block;font-weight:400;opacity:.9;}
+
   /* Admin toolbar */
   .toolbar{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px;}
   .toolbtn{flex:1;min-width:130px;background:var(--card);border:1px solid var(--line);
