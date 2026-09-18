@@ -655,23 +655,19 @@ const head = document.createElement("div");
     };
   }
   if(collapsible){
-    head.onclick = async () => {
+    // Abrir/cerrar una ficha es solo un cambio de vista local: STATE ya
+    // tiene los datos de todos los managers (cargados al entrar, o con el
+    // ultimo "🔄 Actualizar ahora"). Volver a pedirlos aca de nuevo en
+    // cada clic no aporta nada y es lento (getAllClients trae cada
+    // cliente con una llamada individual a Netlify Blobs); si se quiere
+    // ver algo que acaba de llegar, esta el boton de actualizar.
+    head.onclick = () => {
       if(openCards.has(managerName)){
         openCards.delete(managerName);
-        render();
       } else {
         openCards.add(managerName);
-        // Antes de mostrar la lista de este manager, traemos los
-        // datos mas recientes del servidor (nunca una copia vieja
-        // guardada en el dispositivo).
-        const fresh = await loadShared();
-        if(fresh && !fresh.error){
-          STATE = fresh;
-          if(!STATE.managers) STATE.managers = [];
-          if(!STATE.clients) STATE.clients = [];
-        }
-        render();
       }
+      render();
     };
   }
   card.appendChild(head);
@@ -1179,8 +1175,9 @@ function renderManagerHorarioLista(managerName){
 
 // Componente compartido por renderMiHorario() y renderManagerHorarioLista():
 // lista de 3 dias x 27 filas de horario (8:00am-9:00pm, cada 30min) para UN
-// solo manager. "onBack" decide a donde vuelve el boton "Volver" (a la
-// vista normal del manager, o a la lista de managers del admin).
+// solo manager. "onBack" decide a donde vuelve el boton "Salir" (a la vista
+// normal del manager, o a la lista de managers del admin) — a diferencia de
+// "Dias anteriores", que se queda siempre dentro de este mismo calendario.
 function renderHorarioLista(managerName, title, onBack){
   if(!calendarStart) calendarStart = todayStr();
   const wrap = document.createElement("div");
@@ -1188,16 +1185,26 @@ function renderHorarioLista(managerName, title, onBack){
 
   const toolbar = document.createElement("div");
   toolbar.className = "toolbar calToolbar";
-  const backBtn = document.createElement("button");
-  backBtn.className = "toolbtn";
-  backBtn.textContent = "⬅ Volver";
-  backBtn.onclick = onBack;
+  const prevBtn = document.createElement("button");
+  prevBtn.className = "toolbtn";
+  prevBtn.textContent = "◀ Días anteriores";
+  // No se puede retroceder antes de hoy: si el primer dia visible ya es
+  // hoy (o, por alguna razon, uno anterior), el boton queda deshabilitado
+  // en vez de mandar al calendario a fechas pasadas.
+  const atStart = calendarStart <= todayStr();
+  prevBtn.disabled = atStart;
+  prevBtn.onclick = atStart ? null : () => { calendarStart = addDaysStr(calendarStart, -3); render(); };
   const nextBtn = document.createElement("button");
   nextBtn.className = "toolbtn";
   nextBtn.textContent = "Ver siguientes ▶";
   nextBtn.onclick = () => { calendarStart = addDaysStr(calendarStart, 3); render(); };
-  toolbar.appendChild(backBtn);
+  const exitBtn = document.createElement("button");
+  exitBtn.className = "toolbtn toolbtnExit";
+  exitBtn.textContent = "🚪 Salir";
+  exitBtn.onclick = onBack;
+  toolbar.appendChild(prevBtn);
   toolbar.appendChild(nextBtn);
+  toolbar.appendChild(exitBtn);
   wrap.appendChild(toolbar);
 
   const h = document.createElement("h3");
@@ -1531,17 +1538,36 @@ function openChangeManagerModal(c){
                   // solo manager, asi que no puede quedar viendo un cliente
                   // que ya paso a otro manager distinto.
                   const teniaSubgestor = !!c.subgestorId;
+                  const nuevoCreadoEn = Date.now();
+                  // Solo mandamos "manager" y "creadoEn" (el nombre no
+                  // cambia en una reasignacion): mandar "nombre" sin
+                  // necesidad hace que el servidor corra la revision de
+                  // duplicados de toda la cartera, que es lenta y no hace
+                  // falta para este cambio.
+                  const res = await saveClientRemote(
+                    { id: c.id, manager: nombreManager, creadoEn: nuevoCreadoEn },
+                    ['manager', 'creadoEn']
+                  );
+                  if(!res.ok){
+                    // No tocamos el cliente en memoria: si el guardado
+                    // falla, la pantalla se queda mostrando el manager
+                    // ANTERIOR (el real), en vez de dar por hecho el
+                    // cambio y que "reaparezca" recien al refrescar.
+                    showBadge(false);
+                    btn.disabled = false;
+                    btn.textContent = nombreManager;
+                    return;
+                  }
                   c.manager = nombreManager;
-            c.creadoEn = Date.now();
-                  const res = await saveClientRemote(c, ['nombre','manager','creadoEn']);
-                  if(res.ok && teniaSubgestor){
+                  c.creadoEn = nuevoCreadoEn;
+                  if(teniaSubgestor){
                     await liberarRemote(c.id);
                     c.subgestorId = "";
                     c.subgestorNombre = "";
                     c.derivadoEn = 0;
                     c.resultadoRegistradoEn = 0;
                   }
-                  showBadge(res.ok);
+                  showBadge(true);
                   close();
                   render();
           };
