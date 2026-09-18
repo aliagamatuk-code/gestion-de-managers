@@ -43,6 +43,9 @@ let openCards = new Set();
 let calendarOpen = false;  // si se esta mostrando "Calendario General" (admin) / "Mi horario" (manager)
 let calendarStart = null;  // "yyyy-mm-dd" del primer dia visible de la ventana de 3 dias
 let calendarManagerView = null; // nombre del manager cuyo horario individual esta viendo el admin, o null
+// Para el sub-gestor: "Mi horario" es su pantalla principal (false = la ve
+// apenas entra); true = esta viendo la lista de clientes (vista secundaria).
+let subgestorListOpen = false;
 
 /* ===================== STORAGE HELPERS (real backend via /api) ===================== */
 async function loadShared(token){
@@ -425,9 +428,11 @@ function render(){
       app.appendChild(renderCitasHoy(STATE.clients));
       app.appendChild(renderManagerCard(CURRENT_USER.name, false, null));
     }
-  } else {
+  } else if(subgestorListOpen){
     app.appendChild(renderSubgestorToolbar());
     app.appendChild(renderSubgestorClientList());
+  } else {
+    app.appendChild(renderSubgestorHorario());
   }
   root.appendChild(app);
 }
@@ -1173,12 +1178,37 @@ function renderManagerHorarioLista(managerName){
   );
 }
 
-// Componente compartido por renderMiHorario() y renderManagerHorarioLista():
-// lista de 3 dias x 27 filas de horario (8:00am-9:00pm, cada 30min) para UN
-// solo manager. "onBack" decide a donde vuelve el boton "Salir" (a la vista
-// normal del manager, o a la lista de managers del admin) — a diferencia de
-// "Dias anteriores", que se queda siempre dentro de este mismo calendario.
-function renderHorarioLista(managerName, title, onBack){
+// Vista PRINCIPAL del sub-gestor (entra por su link personal): mismo
+// formato de "Mi horario" que el manager, pero mostrando solo SUS propias
+// citas derivadas. STATE.clients ya viene del backend filtrado a solo esas
+// citas (subgestorId === el suyo); como esos clientes conservan su
+// client.manager original, filtrar por CURRENT_USER.managerName en
+// clientsForManagerDay (via renderHorarioLista) alcanza para mostrar
+// unicamente sus propias citas, nunca las de otro sub-gestor ni el resto de
+// la cartera del manager. No tiene boton "Salir": esta ya es su pantalla de
+// entrada. En su lugar, un boton lleva a la lista de clientes (vista
+// secundaria, ver renderSubgestorClientList).
+function renderSubgestorHorario(){
+  return renderHorarioLista(
+    CURRENT_USER.managerName,
+    "📅 Mi horario — " + CURRENT_USER.name,
+    null,
+    [{ label: "📋 Ver mis clientes", onClick: () => { subgestorListOpen = true; render(); } }]
+  );
+}
+
+// Componente compartido por renderMiHorario(), renderManagerHorarioLista() y
+// renderSubgestorHorario(): lista de 3 dias x 27 filas de horario
+// (8:00am-9:00pm, cada 30min) para UN solo manager (o, en el caso del
+// sub-gestor, filtrado a las citas de su manager pero ya restringidas por el
+// backend a solo las que tiene derivadas). "onBack" decide a donde vuelve el
+// boton "Salir" (a la vista normal del manager, o a la lista de managers del
+// admin) — a diferencia de "Dias anteriores", que se queda siempre dentro de
+// este mismo calendario. Si no se pasa "onBack" (caso del sub-gestor, para
+// quien esta es la pantalla principal) no se muestra boton de salida.
+// "extraButtons" (opcional) agrega botones propios al final de esta barra,
+// por ejemplo el que usa el sub-gestor para ir a su lista de clientes.
+function renderHorarioLista(managerName, title, onBack, extraButtons){
   if(!calendarStart) calendarStart = todayStr();
   const wrap = document.createElement("div");
   wrap.className = "calendarWrap";
@@ -1198,13 +1228,22 @@ function renderHorarioLista(managerName, title, onBack){
   nextBtn.className = "toolbtn";
   nextBtn.textContent = "Ver siguientes ▶";
   nextBtn.onclick = () => { calendarStart = addDaysStr(calendarStart, 3); render(); };
-  const exitBtn = document.createElement("button");
-  exitBtn.className = "toolbtn toolbtnExit";
-  exitBtn.textContent = "🚪 Salir";
-  exitBtn.onclick = onBack;
   toolbar.appendChild(prevBtn);
   toolbar.appendChild(nextBtn);
-  toolbar.appendChild(exitBtn);
+  (extraButtons || []).forEach(def => {
+    const b = document.createElement("button");
+    b.className = "toolbtn";
+    b.textContent = def.label;
+    b.onclick = def.onClick;
+    toolbar.appendChild(b);
+  });
+  if(onBack){
+    const exitBtn = document.createElement("button");
+    exitBtn.className = "toolbtn toolbtnExit";
+    exitBtn.textContent = "🚪 Salir";
+    exitBtn.onclick = onBack;
+    toolbar.appendChild(exitBtn);
+  }
   wrap.appendChild(toolbar);
 
   const h = document.createElement("h3");
@@ -1901,11 +1940,17 @@ function renderManagerToolbar(){
 }
 
 /* ===================== TOOLBAR Y LISTA DEL SUB-GESTOR ===================== */
+// Toolbar de la vista SECUNDARIA del sub-gestor (la lista de clientes). La
+// vista principal ("Mi horario", renderSubgestorHorario) no usa este
+// toolbar: su propio boton "Salir" del calendario esta reemplazado por
+// "📋 Ver mis clientes" — desde aca, el boton "📅 Mi horario" hace el
+// camino inverso, igual patron que ya usan admin/manager con su calendario.
 function renderSubgestorToolbar(){
   const box = document.createElement("div");
   box.className = "toolbar";
   box.innerHTML = `
   <button class="toolbtn" id="tbRefresh">🔄 Actualizar ahora</button>
+  <button class="toolbtn" id="tbHorario">📅 Mi horario</button>
   <button class="toolbtn" id="tbExport">⬇️ Exportar mi Excel</button>
   `;
   box.querySelector("#tbRefresh").onclick = async (e) => {
@@ -1918,6 +1963,7 @@ function renderSubgestorToolbar(){
     }
     render();
   };
+  box.querySelector("#tbHorario").onclick = () => { subgestorListOpen = false; render(); };
   box.querySelector("#tbExport").onclick = exportMyExcel;
   return box;
 }
