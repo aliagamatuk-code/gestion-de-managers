@@ -76,7 +76,7 @@ await s.set(MIGRATION_KEY_TOKENS, "1");
 }
 
 export type SubgestorRecord = { id: string; nombre: string; telefono: string; token: string };
-export type ManagerRecord = { name: string; token: string; subgestores?: SubgestorRecord[] };
+export type ManagerRecord = { name: string; token: string; telefono?: string; subgestores?: SubgestorRecord[] };
 
 // Cambia el nombre de un manager que ya existe (por ejemplo, si otra
 // persona toma su lugar, o para corregir un nombre mal escrito).
@@ -128,16 +128,34 @@ const managers = await s.get("managers", { type: "json" });
 return Array.isArray(managers) ? managers : [];
 }
 
-export async function addManagerIfMissing(name: string) {
+export async function addManagerIfMissing(name: string, telefono?: string) {
 await ensureMigrated();
 await ensureManagerTokens();
 const s = store();
 const managers = await getManagers();
 const exists = managers.some((m) => normName(m.name) === normName(name));
 if (!exists && name) {
-managers.push({ name, token: genToken() });
+managers.push({ name, token: genToken(), telefono: telefono || "" });
 await s.setJSON("managers", managers);
 }
+}
+
+// Cambia (o carga por primera vez) el telefono de un manager que ya
+// existe. Se usa para poder avisarle por SMS cuando se le reasigna un
+// cliente (ver aviso de asignacion en api.mts /api/client). Un manager
+// creado automaticamente por una cita nueva (appointment.mts) no trae
+// telefono todavia: el administrador lo carga despues, a mano, desde la
+// pantalla de managers.
+export async function setManagerTelefono(name: string, telefono: string): Promise<ManagerRecord | null> {
+await ensureMigrated();
+await ensureManagerTokens();
+const s = store();
+const managers = await getManagers();
+const idx = managers.findIndex((m) => m.name === name);
+if (idx === -1) return null;
+managers[idx] = { ...managers[idx], telefono };
+await s.setJSON("managers", managers);
+return managers[idx];
 }
 
 // Genera un codigo secreto NUEVO para un manager que ya existe. El
@@ -379,4 +397,50 @@ c.id !== excludeId &&
 (np && normPhone(c.telefono) === np) ||
 (nd && normDireccion(c.direccion) === nd))
 );
+}
+
+// ---- Choque de horario (reasignar manager / derivar sub-gestor) ----
+// Interpreta fechaCita igual que el frontend (public/app-web.js,
+// parseFechaCita), para poder comparar horarios tambien del lado del
+// servidor. Si no se puede leer la fecha, no arriesga: devuelve null.
+export function parseFechaCita(str: any): Date | null {
+  if (!str) return null;
+  const s = str.toString().trim();
+  const m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4}),?\s*(\d{1,2}):(\d{2})(?::(\d{2}))?/);
+  if (m) {
+    const [, d, mo, y, h, mi, se] = m;
+    const dt = new Date(Number(y), Number(mo) - 1, Number(d), Number(h), Number(mi), Number(se || 0));
+    return isNaN(dt.getTime()) ? null : dt;
+  }
+  const dt2 = new Date(s);
+  return isNaN(dt2.getTime()) ? null : dt2;
+}
+
+const UNA_HORA_MS = 60 * 60 * 1000;
+
+function formatHoraChoque(dt: Date): string {
+  return String(dt.getHours()).padStart(2, "0") + ":" + String(dt.getMinutes()).padStart(2, "0");
+}
+
+// Revisa si, entre las citas que YA tiene el receptor (deben venir
+// pre-filtradas por quien llama: solo las de un manager sin sub-gestor
+// asignado, o solo las de un sub-gestor puntual), hay alguna a una hora
+// o menos de distancia de "fechaCita". Se usa para avisar de un choque
+// de horario ANTES de reasignar/derivar una cita. Si no se puede leer
+// alguna de las dos fechas, esa comparacion se ignora (mejor no marcar
+// un choque que no se puede confirmar con certeza).
+export function buscarChoqueHorario(
+  citasDelReceptor: any[],
+  fechaCita: any
+): { hora: string } | null {
+  const target = parseFechaCita(fechaCita);
+  if (!target) return null;
+  for (const c of citasDelReceptor) {
+    const otro = parseFechaCita(c.fechaCita);
+    if (!otro) continue;
+    if (Math.abs(otro.getTime() - target.getTime()) <= UNA_HORA_MS) {
+      return { hora: formatHoraChoque(otro) };
+    }
+  }
+  return null;
 }

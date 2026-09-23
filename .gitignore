@@ -1,0 +1,6 @@
+# Local Netlify folder
+.netlify
+
+# Local dependencies (installed for local testing; Netlify installs these at deploy time)
+node_modules
+package-lock.json

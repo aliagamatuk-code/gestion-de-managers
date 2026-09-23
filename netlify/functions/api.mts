@@ -18,8 +18,11 @@ import {
   deleteSubgestor,
   findManagerAndSubgestorByToken,
   findSubgestorById,
+  buscarChoqueHorario,
+  setManagerTelefono,
 } from "./_store-helpers.mts";
 import { enviarRecuperacion, marcarEnviado } from "./_recuperacion.mts";
+import { mensajeAvisoAsignacion, enviarAvisoAsignacion } from "./_avisos.mts";
 
 // Si un cliente ACABA de pasar a "No atendió" (antes tenia otro estado),
 // le manda el SMS de recuperacion de inmediato y deja el cliente listo
@@ -242,6 +245,12 @@ export default async (req: Request, context: Context) => {
         // ---- Flujo normal del administrador (como ya funcionaba) ----
         let client: any;
         let estadoAntesDeGuardar: string | undefined;
+        // Si esto termina siendo una reasignacion de manager, guardamos
+        // aca el telefono y el mensaje para avisarle por SMS DESPUES de
+        // guardar (nunca antes: si el guardado falla, no hay que avisar
+        // nada). Si el manager nuevo no tiene telefono cargado, queda en
+        // null y simplemente no se manda nada.
+        let avisoNuevoManager: { telefono: string; mensaje: string } | null = null;
 
         if (body.id) {
           // Actualizando un cliente que ya existe. Puede venir con la ficha
@@ -253,6 +262,44 @@ export default async (req: Request, context: Context) => {
           const existing = await getClient(body.id);
           if (!existing) return json({ error: "not_found" }, 404);
           estadoAntesDeGuardar = existing.estado;
+
+          // Choque de horario: si esto es una reasignacion de manager (viene
+          // "manager" y es distinto al que ya tenia), revisamos ANTES de
+          // guardar si el manager nuevo ya tiene otra cita a una hora o menos
+          // de distancia, comparando SOLO contra las citas que ese manager
+          // tiene asignadas DIRECTAMENTE (nunca las que tiene derivadas a sus
+          // propios sub-gestores). Si hay choque y todavia no vino
+          // confirmarChoque:true, no guardamos: el frontend le pregunta al
+          // admin si quiere igual, y si confirma vuelve a mandar el pedido.
+          if ("manager" in body && body.manager && body.manager !== existing.manager) {
+            const todos = await getAllClients();
+            const citasDelReceptor = todos.filter(
+              (cc: any) => cc.manager === body.manager && !cc.subgestorId && cc.id !== existing.id
+            );
+            const choque = buscarChoqueHorario(citasDelReceptor, existing.fechaCita);
+            if (choque && !body.confirmarChoque) {
+              return json(
+                {
+                  error: "choque_horario",
+                  message: `Este manager ya tiene una cita a las ${choque.hora}, ¿de todos modos querés asignarle esta?`,
+                  hora: choque.hora,
+                },
+                409
+              );
+            }
+            body.choqueHorario = !!choque;
+
+            const managers = await getManagers();
+            const mgrDestino = managers.find((m) => m.name === body.manager);
+            if (mgrDestino && mgrDestino.telefono) {
+              avisoNuevoManager = {
+                telefono: mgrDestino.telefono,
+                mensaje: mensajeAvisoAsignacion({ ...existing, manager: body.manager }),
+              };
+            }
+          }
+          delete body.confirmarChoque;
+
           client = { ...existing, ...body };
           if ("estado" in body) client.resultadoRegistradoEn = Date.now();
 
@@ -348,6 +395,12 @@ export default async (req: Request, context: Context) => {
         await saveClient(client);
         await manejarTransicionNoAtendio(estadoAntesDeGuardar, client);
         if (client.recuperacionEnvios) await saveClient(client);
+        // Aviso por SMS al manager nuevo (si hubo reasignacion y tiene
+        // telefono cargado): se manda DESPUES de guardar, y si falla no
+        // afecta el guardado (ver enviarAvisoAsignacion en _avisos.mts).
+        if (avisoNuevoManager) {
+          await enviarAvisoAsignacion(avisoNuevoManager.telefono, avisoNuevoManager.mensaje);
+        }
         return json({ ok: true, client });
       }
       if (method === "DELETE") {
@@ -403,6 +456,14 @@ export default async (req: Request, context: Context) => {
         if (body.regenerateToken) {
           const mgr = await regenerateManagerToken(name);
           if (!mgr) return json({ error: "not_found" }, 404);
+          return json({ ok: true, manager: mgr });
+        }
+        // El telefono es opcional (se usa solo para poder avisarle por SMS
+        // cuando se le reasigna un cliente). Si viene, esto tambien sirve
+        // para cargarselo/cambiarselo a un manager que ya existe.
+        if ("telefono" in body) {
+          await addManagerIfMissing(name, (body.telefono || "").toString().trim());
+          const mgr = await setManagerTelefono(name, (body.telefono || "").toString().trim());
           return json({ ok: true, manager: mgr });
         }
         await addManagerIfMissing(name);
@@ -527,12 +588,40 @@ export default async (req: Request, context: Context) => {
         );
       }
 
+      // Choque de horario: revisamos si este sub-gestor ya tiene otra cita a
+      // una hora o menos de distancia, comparando SOLO contra las citas que
+      // tiene asignadas DIRECTAMENTE. Si hay choque y no vino
+      // confirmarChoque:true, no guardamos todavia (ver mismo patron en
+      // /api/client, arriba).
+      const todosLosClientes = await getAllClients();
+      const citasDelReceptor = todosLosClientes.filter(
+        (cc: any) => cc.subgestorId === subgestorId && cc.id !== existing.id
+      );
+      const choque = buscarChoqueHorario(citasDelReceptor, existing.fechaCita);
+      if (choque && !body.confirmarChoque) {
+        return json(
+          {
+            error: "choque_horario",
+            message: `Este sub-gestor ya tiene una cita a las ${choque.hora}, ¿de todos modos querés asignarle esta?`,
+            hora: choque.hora,
+          },
+          409
+        );
+      }
+
       const client = { ...existing };
       client.subgestorId = sub.id;
       client.subgestorNombre = sub.nombre;
       client.derivadoEn = Date.now();
       client.resultadoRegistradoEn = 0;
+      client.choqueHorario = !!choque;
       await saveClient(client);
+      // Aviso por SMS al sub-gestor (si tiene telefono cargado, que es lo
+      // normal): se manda DESPUES de guardar y nunca afecta la derivacion
+      // si falla (ver enviarAvisoAsignacion en _avisos.mts).
+      if (sub.telefono) {
+        await enviarAvisoAsignacion(sub.telefono, mensajeAvisoAsignacion(existing));
+      }
       return json({ ok: true, client });
     }
 
@@ -558,6 +647,9 @@ export default async (req: Request, context: Context) => {
       client.subgestorNombre = "";
       client.derivadoEn = 0;
       client.resultadoRegistradoEn = 0;
+      // Al liberar, la cita vuelve a quedar directamente con el manager: el
+      // choque (si lo hubo) era contra el sub-gestor anterior, ya no aplica.
+      client.choqueHorario = false;
       await saveClient(client);
       return json({ ok: true, client });
     }

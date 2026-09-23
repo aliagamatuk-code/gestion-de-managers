@@ -109,15 +109,29 @@ async function deleteClientRemote(id){
     return r.ok;
   }catch(e){ return false; }
 }
-async function addManagerRemote(name){
+async function addManagerRemote(name, telefono){
+  try{
+    const body = telefono !== undefined ? {name, telefono} : {name};
+    const r = await fetch('/api/manager', {
+      method:'POST',
+      headers:{'content-type':'application/json'},
+      body: JSON.stringify(body)
+    });
+    return r.ok;
+  }catch(e){ return false; }
+}
+// Carga o cambia el telefono de un manager que ya existe (para poder
+// avisarle por SMS cuando se le reasigna un cliente).
+async function setManagerTelefonoRemote(name, telefono){
   try{
     const r = await fetch('/api/manager', {
       method:'POST',
       headers:{'content-type':'application/json'},
-      body: JSON.stringify({name})
+      body: JSON.stringify({name, telefono})
     });
-    return r.ok;
-  }catch(e){ return false; }
+    const data = await r.json().catch(()=>({}));
+    return {ok:r.ok, data};
+  }catch(e){ return {ok:false, data:{}}; }
 }
 async function deleteManagerRemote(name){
   try{
@@ -164,11 +178,24 @@ async function deleteSubgestorRemote(managerName, id){
     return r.ok;
   }catch(e){ return false; }
 }
-async function derivarRemote(clientId, subgestorId){
+async function derivarRemote(clientId, subgestorId, confirmarChoque){
   try{
-    const body = { clientId, subgestorId };
+    const body = { clientId, subgestorId, confirmarChoque: !!confirmarChoque };
     if(CURRENT_USER && CURRENT_USER.type === "manager") body.token = CURRENT_USER.token;
     const r = await fetch('/api/derivar', {
+      method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(body)
+    });
+    const data = await r.json().catch(()=>({}));
+    return {ok:r.ok, data};
+  }catch(e){ return {ok:false, data:{}}; }
+}
+// Reasigna un cliente a otro manager. Se manda como pedido propio (no via
+// saveClientRemote) para poder agregar "confirmarChoque" sin que quede
+// pegado como si fuera un campo real del cliente.
+async function cambiarManagerRemote(clientId, nuevoManager, creadoEn, confirmarChoque){
+  try{
+    const body = { id: clientId, manager: nuevoManager, creadoEn, confirmarChoque: !!confirmarChoque };
+    const r = await fetch('/api/client', {
       method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(body)
     });
     const data = await r.json().catch(()=>({}));
@@ -629,13 +656,16 @@ function renderManagerCard(managerName, collapsible, token){
   const card = document.createElement("div");
   card.className = "mgrcard" + (openCards.has(managerName) || !collapsible ? " open" : "");
 
-const head = document.createElement("div");
+const mgrRecordHead = STATE.managers.find(m => m.name === managerName);
+  const telefonoActual = (mgrRecordHead && mgrRecordHead.telefono) || "";
+  const head = document.createElement("div");
   head.className = "mgrhead";
   head.innerHTML = `
   <div class="donut" style="${donutStyle(clients)}"></div>
-  <div class="info"><b>${managerName}</b><span>${clients.length} cliente${clients.length===1?"":"s"}</span></div>
+  <div class="info"><b>${managerName}</b><span>${clients.length} cliente${clients.length===1?"":"s"}${telefonoActual ? " · 📞 " + esc(telefonoActual) : ""}</span></div>
   ${token ? '<button class="miniBtn" data-x="horario" title="Ver horario (huecos libres por dia)" style="margin-right:4px;">🗓️</button>' : ''}
   ${token ? '<button class="miniBtn" data-x="rename" title="Renombrar manager" style="margin-right:4px;">✏️</button>' : ''}
+  ${token ? `<button class="miniBtn" data-x="telefono" title="${telefonoActual ? 'Cambiar teléfono' : 'Cargar teléfono (para avisos por SMS)'}" style="margin-right:4px;">📞</button>` : ''}
   ${token ? '<button class="miniBtn" data-x="link" title="Copiar link personal" style="margin-right:4px;">🔗</button>' : ''}
   ${token ? '<button class="miniBtn" data-x="revoke" title="Generar link nuevo (corta el acceso al anterior)" style="margin-right:4px;">🔁</button>' : ''}
   ${collapsible ? '<div class="chev">▾</div>' : ''}
@@ -649,6 +679,10 @@ const head = document.createElement("div");
     head.querySelector('[data-x="rename"]').onclick = (ev) => {
       ev.stopPropagation();
       openRenameManagerModal(managerName);
+    };
+    head.querySelector('[data-x="telefono"]').onclick = (ev) => {
+      ev.stopPropagation();
+      openManagerPhoneModal(managerName, telefonoActual);
     };
     head.querySelector('[data-x="link"]').onclick = (ev) => {
       ev.stopPropagation();
@@ -823,6 +857,29 @@ function confirmDeleteSubgestor(managerName, sg){
   };
 }
 
+/* ===================== CHOQUE DE HORARIO ===================== */
+// Modal de confirmacion compartido por la reasignacion de manager y la
+// derivacion a sub-gestor: el servidor ya detecto que el receptor tiene
+// otra cita a una hora o menos de distancia, y esto le pregunta al
+// admin/manager si quiere asignarla de todos modos.
+function showChoqueConfirmModal(message, onConfirm, onCancel){
+  const body = document.createElement("div");
+  body.innerHTML = `
+  <h3>⚠️ Choque de horario</h3>
+  <p style="font-size:13px;color:var(--muted);">${esc(message)}</p>
+  <div class="modalbtns">
+  <button class="btncancel" id="chqNo">Cancelar</button>
+  <button class="btndanger" id="chqYes">Sí, asignar igual</button>
+  </div>
+  `;
+  const close = showModal(body);
+  body.querySelector("#chqNo").onclick = () => { close(); if(onCancel) onCancel(); };
+  body.querySelector("#chqYes").onclick = async () => {
+    close();
+    await onConfirm();
+  };
+}
+
 /* ===================== DERIVAR / LIBERAR ===================== */
 function openDerivarModal(c){
   const mgrRecord = STATE.managers.find(m => m.name === c.manager);
@@ -851,25 +908,36 @@ function openDerivarModal(c){
     const btn = document.createElement("button");
     btn.className = "namebtn";
     btn.textContent = sg.nombre + (sg.telefono ? ` — ${sg.telefono}` : "");
-    btn.onclick = async () => {
-      btn.disabled = true;
-      btn.textContent = "Guardando…";
-      const res = await derivarRemote(c.id, sg.id);
-      if(!res.ok){
-        showToast((res.data && res.data.message) || "No se pudo derivar", true);
-        btn.disabled = false;
-        btn.textContent = sg.nombre;
-        return;
-      }
-      c.subgestorId = sg.id;
-      c.subgestorNombre = sg.nombre;
-      c.derivadoEn = Date.now();
-      c.resultadoRegistradoEn = 0;
-      showBadge(true);
-      close(); render();
-    };
+    btn.onclick = () => intentarDerivar(c, sg, false, btn, close);
     list.appendChild(btn);
   });
+}
+
+async function intentarDerivar(c, sg, confirmarChoque, btn, closeParentModal){
+  btn.disabled = true;
+  btn.textContent = "Guardando…";
+  const res = await derivarRemote(c.id, sg.id, confirmarChoque);
+  if(!res.ok){
+    if(res.data && res.data.error === "choque_horario"){
+      showChoqueConfirmModal(
+        res.data.message || "Este sub-gestor ya tiene otra cita cerca de este horario.",
+        () => intentarDerivar(c, sg, true, btn, closeParentModal),
+        () => { btn.disabled = false; btn.textContent = sg.nombre; }
+      );
+      return;
+    }
+    showToast((res.data && res.data.message) || "No se pudo derivar", true);
+    btn.disabled = false;
+    btn.textContent = sg.nombre;
+    return;
+  }
+  c.subgestorId = sg.id;
+  c.subgestorNombre = sg.nombre;
+  c.derivadoEn = Date.now();
+  c.resultadoRegistradoEn = 0;
+  c.choqueHorario = !!(res.data.client && res.data.client.choqueHorario);
+  showBadge(true);
+  closeParentModal(); render();
 }
 
 function confirmLiberar(c){
@@ -925,7 +993,8 @@ function renderCitasHoy(clients){
     const hora = dt ? dt.toLocaleTimeString("es", {hour:"2-digit", minute:"2-digit"}) : "";
     const asignado = c.subgestorId ? `Sub-gestor: ${esc(c.subgestorNombre||"")}` : "Sin asignar";
     const alerta = isDerivacionVencida(c) ? ' <span class="derivflag">🟠 +24h sin resultado</span>' : "";
-    rows += `<div class="citahoyrow${c.subgestorId?"":" sinasignar"}"><b>${esc(hora)}</b> — ${esc(c.nombre)} <span class="cmeta">(${asignado})</span>${alerta}</div>`;
+    const choqueAlerta = c.choqueHorario ? ' <span class="choqueflag">⚠️ Cruce de horario</span>' : "";
+    rows += `<div class="citahoyrow${c.subgestorId?"":" sinasignar"}"><b>${esc(hora)}</b> — ${esc(c.nombre)} <span class="cmeta">(${asignado})</span>${alerta}${choqueAlerta}</div>`;
   });
   box.innerHTML = `<h3>📅 Citas de hoy (${citas.length})</h3>${rows}`;
   return box;
@@ -1129,7 +1198,7 @@ function renderCalendarStrip(title, managerNames){
         block.style.left = (colIndex * 100 / colCount) + "%";
         block.style.width = (100 / colCount) + "%";
         block.style.background = managerColor(name);
-        block.innerHTML = `${esc(it.c.nombre)}<span class="calCity">${esc(cityFromDireccion(it.c.direccion))}</span>`;
+        block.innerHTML = `${it.c.choqueHorario ? "⚠️ " : ""}${esc(it.c.nombre)}<span class="calCity">${esc(cityFromDireccion(it.c.direccion))}</span>`;
         block.onclick = () => openClientDetailModal(it.c);
         cell.appendChild(block);
       });
@@ -1286,8 +1355,8 @@ function renderHorarioLista(managerName, title, onBack, extraButtons){
       const entries = bySlot.get(slotMin) || [];
       entries.forEach(it => {
         const entry = document.createElement("div");
-        entry.className = "miHorarioEntry";
-        entry.innerHTML = `${esc(it.c.nombre)}<span class="miHorarioCity">${esc(cityFromDireccion(it.c.direccion))}</span>`;
+        entry.className = "miHorarioEntry" + (it.c.choqueHorario ? " choque" : "");
+        entry.innerHTML = `${it.c.choqueHorario ? "⚠️ " : ""}${esc(it.c.nombre)}<span class="miHorarioCity">${esc(cityFromDireccion(it.c.direccion))}</span>`;
         entry.onclick = () => openClientDetailModal(it.c);
         entryWrap.appendChild(entry);
       });
@@ -1310,7 +1379,7 @@ function renderClientCard(c){
   const vencido = isVencidoPendiente(c);
   const derivVencida = isDerivacionVencida(c);
   const el = document.createElement("div");
-  el.className = "clientcard" + (vencido ? " vencido" : "") + (derivVencida ? " alertaderiv" : "");
+  el.className = "clientcard" + (vencido ? " vencido" : "") + (derivVencida ? " alertaderiv" : "") + (c.choqueHorario ? " choque" : "");
   const telHref = c.telefono ? `tel:${c.telefono.replace(/[^0-9+]/g,"")}` : "#";
   el.innerHTML = `
   <div class="cname">${esc(c.nombre)}</div>
@@ -1323,6 +1392,7 @@ function renderClientCard(c){
   </div>
   ${vencido ? '<div class="vencidoflag">🔴 Cita vencida sin actualizar</div>' : ""}
   ${derivVencida ? '<div class="derivflag">🟠 Derivada hace más de 24h sin resultado</div>' : ""}
+  ${c.choqueHorario ? '<div class="choqueflag">⚠️ Cruce de horario con otra cita del mismo receptor</div>' : ""}
   ${c.revisar ? '<div class="revisarflag">⚠️ Revisar: estado heredado del sistema anterior</div>' : ""}
   `;
 
@@ -1569,49 +1639,50 @@ function openChangeManagerModal(c){
           const btn = document.createElement("button");
           btn.className = "namebtn";
           btn.textContent = nombreManager;
-          btn.onclick = async () => {
-                  btn.disabled = true;
-                  btn.textContent = "Guardando…";
-                  // Si esta cita estaba derivada a un sub-gestor del manager
-                  // ANTERIOR, hay que liberarla: un sub-gestor pertenece a un
-                  // solo manager, asi que no puede quedar viendo un cliente
-                  // que ya paso a otro manager distinto.
-                  const teniaSubgestor = !!c.subgestorId;
-                  const nuevoCreadoEn = Date.now();
-                  // Solo mandamos "manager" y "creadoEn" (el nombre no
-                  // cambia en una reasignacion): mandar "nombre" sin
-                  // necesidad hace que el servidor corra la revision de
-                  // duplicados de toda la cartera, que es lenta y no hace
-                  // falta para este cambio.
-                  const res = await saveClientRemote(
-                    { id: c.id, manager: nombreManager, creadoEn: nuevoCreadoEn },
-                    ['manager', 'creadoEn']
-                  );
-                  if(!res.ok){
-                    // No tocamos el cliente en memoria: si el guardado
-                    // falla, la pantalla se queda mostrando el manager
-                    // ANTERIOR (el real), en vez de dar por hecho el
-                    // cambio y que "reaparezca" recien al refrescar.
-                    showBadge(false);
-                    btn.disabled = false;
-                    btn.textContent = nombreManager;
-                    return;
-                  }
-                  c.manager = nombreManager;
-                  c.creadoEn = nuevoCreadoEn;
-                  if(teniaSubgestor){
-                    await liberarRemote(c.id);
-                    c.subgestorId = "";
-                    c.subgestorNombre = "";
-                    c.derivadoEn = 0;
-                    c.resultadoRegistradoEn = 0;
-                  }
-                  showBadge(true);
-                  close();
-                  render();
-          };
+          btn.onclick = () => intentarCambiarManager(c, nombreManager, false, btn, close);
           list.appendChild(btn);
     });
+}
+
+async function intentarCambiarManager(c, nombreManager, confirmarChoque, btn, closeParentModal){
+  btn.disabled = true;
+  btn.textContent = "Guardando…";
+  // Si esta cita estaba derivada a un sub-gestor del manager ANTERIOR, hay
+  // que liberarla: un sub-gestor pertenece a un solo manager, asi que no
+  // puede quedar viendo un cliente que ya paso a otro manager distinto.
+  const teniaSubgestor = !!c.subgestorId;
+  const nuevoCreadoEn = Date.now();
+  const res = await cambiarManagerRemote(c.id, nombreManager, nuevoCreadoEn, confirmarChoque);
+  if(!res.ok){
+    if(res.data && res.data.error === "choque_horario"){
+      showChoqueConfirmModal(
+        res.data.message || "Este manager ya tiene otra cita cerca de este horario.",
+        () => intentarCambiarManager(c, nombreManager, true, btn, closeParentModal),
+        () => { btn.disabled = false; btn.textContent = nombreManager; }
+      );
+      return;
+    }
+    // No tocamos el cliente en memoria: si el guardado falla, la pantalla
+    // se queda mostrando el manager ANTERIOR (el real), en vez de dar por
+    // hecho el cambio y que "reaparezca" recien al refrescar.
+    showBadge(false);
+    btn.disabled = false;
+    btn.textContent = nombreManager;
+    return;
+  }
+  c.manager = nombreManager;
+  c.creadoEn = nuevoCreadoEn;
+  c.choqueHorario = !!(res.data.client && res.data.client.choqueHorario);
+  if(teniaSubgestor){
+    await liberarRemote(c.id);
+    c.subgestorId = "";
+    c.subgestorNombre = "";
+    c.derivadoEn = 0;
+    c.resultadoRegistradoEn = 0;
+  }
+  showBadge(true);
+  closeParentModal();
+  render();
 }
 
 function formatDate(iso){
@@ -2063,6 +2134,8 @@ function openAddManagerModal(){
   <h3>Agregar manager</h3>
   <label>Nombre del manager</label>
   <input type="text" id="mgrName" placeholder="Nombre completo">
+  <label>Teléfono (opcional)</label>
+  <input type="tel" id="mgrTelefono" placeholder="Para poder avisarle por SMS al reasignarle un cliente">
   <div class="modalbtns">
   <button class="btncancel" id="amCancel">Cancelar</button>
   <button class="btnok" id="amSave">Agregar</button>
@@ -2074,10 +2147,11 @@ function openAddManagerModal(){
     const name = body.querySelector("#mgrName").value.trim();
     if(!name) return;
     if(STATE.managers.some(m => m.name === name)){ alert("Ese manager ya existe."); return; }
+    const telefono = body.querySelector("#mgrTelefono").value.trim();
     const saveBtn = body.querySelector("#amSave");
     saveBtn.disabled = true;
     saveBtn.textContent = "Agregando…";
-    const ok = await addManagerRemote(name);
+    const ok = await addManagerRemote(name, telefono);
     // Volvemos a pedir todo al servidor: asi conseguimos el codigo
     // secreto (link) que el servidor acaba de generar para este
     // manager nuevo, en vez de adivinarlo en la pantalla.
@@ -2151,6 +2225,43 @@ function openRenameManagerModal(oldName){
       saveBtn.disabled = false;
       saveBtn.textContent = "Guardar";
     }
+  };
+}
+
+/* ===================== TELEFONO DE MANAGER (para avisos por SMS) ===================== */
+function openManagerPhoneModal(managerName, telefonoActual){
+  const body = document.createElement("div");
+  body.innerHTML = `
+  <h3>📞 Teléfono — ${esc(managerName)}</h3>
+  <p style="font-size:12.5px;color:var(--muted);">Se usa para avisarle por SMS cuando se le reasigna un cliente nuevo.</p>
+  <label>Teléfono</label>
+  <input type="tel" id="mpTelefono" value="${esc(telefonoActual)}">
+  <div id="mpErr"></div>
+  <div class="modalbtns">
+  <button class="btncancel" id="mpCancel">Cancelar</button>
+  <button class="btnok" id="mpSave">Guardar</button>
+  </div>
+  `;
+  const close = showModal(body);
+  body.querySelector("#mpCancel").onclick = close;
+  const input = body.querySelector("#mpTelefono");
+  input.focus();
+  body.querySelector("#mpSave").onclick = async () => {
+    const telefono = input.value.trim();
+    const saveBtn = body.querySelector("#mpSave");
+    saveBtn.disabled = true;
+    saveBtn.textContent = "Guardando…";
+    const res = await setManagerTelefonoRemote(managerName, telefono);
+    if(!res.ok){
+      body.querySelector("#mpErr").innerHTML = `<div class="dupewarn">⚠️ No se pudo guardar. Intenta de nuevo.</div>`;
+      saveBtn.disabled = false;
+      saveBtn.textContent = "Guardar";
+      return;
+    }
+    const mgrRecord = STATE.managers.find(m => m.name === managerName);
+    if(mgrRecord) mgrRecord.telefono = telefono;
+    showBadge(true);
+    close(); render();
   };
 }
 
