@@ -27,12 +27,16 @@ export function mensajeAvisoAsignacion(client: any): string {
 // GHL falla, o el telefono esta vacio, solo devuelve false. El guardado
 // del cliente/la derivacion NUNCA depende de que este aviso funcione.
 export async function enviarAvisoAsignacion(telefono: string, mensaje: string): Promise<boolean> {
-  if (!telefono) return false;
+  if (!telefono) {
+    console.warn("AVISO: no se mando SMS de asignacion, el receptor no tiene telefono cargado.");
+    return false;
+  }
   const webhookUrl = Netlify.env.get("GHL_WEBHOOK_AVISO_ASIGNACION");
   if (!webhookUrl) {
     console.warn("AVISO: falta configurar GHL_WEBHOOK_AVISO_ASIGNACION, no se pudo avisar por SMS de la asignacion.");
     return false;
   }
+  console.log("AVISO: intentando enviar SMS de asignacion a", telefono);
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 8000);
   try {
@@ -46,6 +50,7 @@ export async function enviarAvisoAsignacion(telefono: string, mensaje: string): 
       console.warn("AVISO: fallo el envio de SMS de asignacion", r.status);
       return false;
     }
+    console.log("AVISO: GHL respondio OK (" + r.status + ") al webhook de asignacion");
     return true;
   } catch (e: any) {
     console.warn("AVISO: error o tiempo agotado enviando SMS de asignacion", e.message);

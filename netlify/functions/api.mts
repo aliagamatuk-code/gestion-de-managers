@@ -296,6 +296,10 @@ export default async (req: Request, context: Context) => {
                 telefono: mgrDestino.telefono,
                 mensaje: mensajeAvisoAsignacion({ ...existing, manager: body.manager }),
               };
+            } else {
+              console.warn(
+                `AVISO: reasignacion a "${body.manager}" sin SMS: ese manager no tiene telefono cargado.`
+              );
             }
           }
           delete body.confirmarChoque;
@@ -384,6 +388,22 @@ export default async (req: Request, context: Context) => {
             // nuevo, sin necesidad de tocar sus datos.
             creadoEn: Date.now(),
           };
+
+          // Mismo aviso por SMS que en la reasignacion, pero para un
+          // cliente que se crea directo para este manager (no es una
+          // reasignacion de uno viejo, es alta nueva desde "Agregar
+          // cliente" o "Pegar y cargar con IA"). Si el manager no tiene
+          // telefono cargado, no se manda nada (igual que arriba).
+          const managers = await getManagers();
+          const mgrDestino = managers.find((m) => m.name === manager);
+          if (mgrDestino && mgrDestino.telefono) {
+            avisoNuevoManager = {
+              telefono: mgrDestino.telefono,
+              mensaje: mensajeAvisoAsignacion(client),
+            };
+          } else {
+            console.warn(`AVISO: cliente nuevo para "${manager}" sin SMS: ese manager no tiene telefono cargado.`);
+          }
         }
         if (pagoIncompleto(client)) {
           return json({ error: "pago_incompleto" }, 400);
