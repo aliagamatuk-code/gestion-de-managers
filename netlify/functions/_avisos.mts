@@ -39,7 +39,7 @@ export async function enviarAvisoAsignacion(telefono: string, mensaje: string): 
     const r = await fetch(webhookUrl, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ phone: telefono, message: mensaje }),
+      body: JSON.stringify({ Phone: telefono, Message: mensaje }),
       signal: controller.signal,
     });
     if (!r.ok) {
