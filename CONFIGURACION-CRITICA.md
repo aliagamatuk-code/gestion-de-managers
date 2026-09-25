@@ -11,7 +11,7 @@ Cual es el sitio correcto
 
 Este repositorio (aliagamatuk-code/gestion-de-managers) es el que
 alimenta la app real que usa Omar todos los dias:
-https://regal-hamster-65a058.netlify.app
+https://gestion-de-managers.netlify.app
 
 Existe otro repositorio viejo (aliagamatuk24/leads-for-managers) que
 se construyo por error en un sitio distinto
@@ -53,7 +53,7 @@ la cita a los campos personalizados Language Text Sync y Appointment
 Time Text Sync.
 
 El paso "Webhook" debe apuntar exactamente a esta direccion:
-https://regal-hamster-65a058.netlify.app/api/appointment?token=Q360-Citas-8f2k91
+https://gestion-de-managers.netlify.app/api/appointment?token=Q360-Citas-8f2k91
 
 Y debe mandar estos Datos personalizados (custom data), con estos
 nombres exactos: calendarId (igual a appointment.calendar_id),
@@ -132,7 +132,7 @@ GHL, debe leerse igual: dentro de customData, no suelto.
 Si algo se rompe, revisa en este orden
 ------------------------------------------
 
-Primero: en Netlify (proyecto regal-hamster-65a058), Deploys, revisa
+Primero: en Netlify (proyecto gestion-de-managers), Deploys, revisa
 si el ultimo deploy dice "Published" en verde, o si fallo.
 
 Segundo: en GHL, Automatizacion, 03 Appointment Booking, Registros de
@@ -177,7 +177,7 @@ Text Sync = {{contact.preferred_analyst_language}}. Appointment Time
 Text Sync = {{appointment.start_time}}.
 
 Paso Webhook: metodo POST. URL exacta:
-https://regal-hamster-65a058.netlify.app/api/appointment?token=Q360-Citas-8f2k91
+https://gestion-de-managers.netlify.app/api/appointment?token=Q360-Citas-8f2k91
 Sin headers extra. Datos personalizados (customData), nombres
 exactos: calendarId = {{appointment.calendar_id}}, nombre =
 {{contact.first_name}} {{contact.last_name}}, telefono =
