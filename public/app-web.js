@@ -46,6 +46,9 @@ let calendarManagerView = null; // nombre del manager cuyo horario individual es
 // Para el sub-gestor: "Mi horario" es su pantalla principal (false = la ve
 // apenas entra); true = esta viendo la lista de clientes (vista secundaria).
 let subgestorListOpen = false;
+// Id del cliente elegido en el buscador: su cita se dibuja resaltada en el
+// Calendario General / Mi horario hasta que se busque otro.
+let highlightClientId = null;
 
 /* ===================== STORAGE HELPERS (real backend via /api) ===================== */
 async function loadShared(token){
@@ -513,7 +516,151 @@ function renderHeader(){
   btn.textContent = "⋮ Menú";
   btn.onclick = openMenuModal;
   h.appendChild(btn);
+  h.appendChild(renderClientSearch());
   return h;
+}
+
+/* ===================== BUSCADOR DE CLIENTES ===================== */
+// Busca SOLO dentro de STATE.clients. Para el admin eso es toda la base;
+// para un manager o sub-gestor el servidor (/api/data con su token) ya
+// le mando unicamente SUS clientes, asi que un cliente de otro manager
+// ni siquiera existe en este navegador: la busqueda da "no se encuentra"
+// exactamente igual que si ese nombre no existiera, sin ninguna pista.
+// Sin acentos ni mayusculas, para que "maria" encuentre "María".
+function normalizarTexto(s){
+  return (s||"").toString().normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().trim();
+}
+// Coincidencia parcial: cada palabra escrita tiene que aparecer en algun
+// lugar del nombre, en cualquier orden ("lop mar" encuentra "María López").
+function buscarClientes(texto){
+  const palabras = normalizarTexto(texto).split(/\s+/).filter(Boolean);
+  if(palabras.length === 0) return [];
+  return STATE.clients
+    .filter(c => {
+      const nombre = normalizarTexto(c.nombre);
+      return palabras.every(p => nombre.includes(p));
+    })
+    .sort((a,b) => normalizarTexto(a.nombre).localeCompare(normalizarTexto(b.nombre)));
+}
+// Para el admin: un cliente "no tiene manager" si el campo esta vacio o si
+// su manager ya no existe en la lista (por ejemplo, se borro). En ese caso
+// no aparece en ninguna fila del Calendario General.
+function clienteSinManager(c){
+  return !c.manager || !STATE.managers.some(m => m.name === c.manager);
+}
+function fechaCitaDia(dt){
+  return dt.getFullYear()+"-"+String(dt.getMonth()+1).padStart(2,"0")+"-"+String(dt.getDate()).padStart(2,"0");
+}
+
+function renderClientSearch(){
+  const wrap = document.createElement("div");
+  wrap.className = "searchwrap";
+  wrap.innerHTML = `
+  <input type="search" class="searchinput" placeholder="🔍 Buscar cliente por nombre o apellido" autocomplete="off">
+  <div class="searchresults" hidden></div>
+  `;
+  const input = wrap.querySelector(".searchinput");
+  const results = wrap.querySelector(".searchresults");
+  const isAdmin = CURRENT_USER.type === "admin";
+
+  // Solo se redibuja la lista de resultados (no toda la pantalla), para no
+  // perder el foco del cuadro mientras se escribe.
+  function pintar(){
+    const texto = input.value;
+    if(!normalizarTexto(texto)){ results.hidden = true; results.innerHTML = ""; return; }
+    const encontrados = buscarClientes(texto);
+    results.hidden = false;
+    if(encontrados.length === 0){
+      results.innerHTML = `<div class="searchempty">No se encuentra ningún cliente con ese nombre.</div>`;
+      return;
+    }
+    results.innerHTML = "";
+    encontrados.slice(0, 30).forEach(c => {
+      const dt = parseFechaCita(c.fechaCita);
+      let cuando = dt
+        ? dt.toLocaleDateString("es", {weekday:"short", day:"numeric", month:"short", year:"numeric"}) + " · " + dt.toLocaleTimeString("es", {hour:"2-digit", minute:"2-digit"})
+        : "Sin fecha de cita válida";
+      cuando = cuando.charAt(0).toUpperCase() + cuando.slice(1);
+      let quien = "";
+      if(isAdmin){
+        quien = clienteSinManager(c)
+          ? ' · <span class="searchwarn">⚠️ Sin manager asignado</span>'
+          : " · " + esc(c.manager) + (c.subgestorId ? " → sub-gestor " + esc(c.subgestorNombre||"") : "");
+      }
+      const row = document.createElement("button");
+      row.type = "button";
+      row.className = "searchrow";
+      row.innerHTML = `<b>${esc(c.nombre)}</b><span>${esc(cuando)}${quien}</span>`;
+      row.onclick = () => { input.value = ""; results.hidden = true; irACitaDeCliente(c); };
+      results.appendChild(row);
+    });
+    if(encontrados.length > 30){
+      const more = document.createElement("div");
+      more.className = "searchempty";
+      more.textContent = `Hay ${encontrados.length - 30} resultados más: escribe más letras para acotar.`;
+      results.appendChild(more);
+    }
+  }
+  input.addEventListener("input", pintar);
+  input.addEventListener("focus", pintar);
+  input.addEventListener("keydown", ev => {
+    if(ev.key === "Escape"){ input.value = ""; pintar(); input.blur(); }
+    if(ev.key === "Enter"){
+      const first = results.querySelector(".searchrow");
+      if(first) first.click();
+    }
+  });
+  return wrap;
+}
+// Cerrar la lista de resultados al tocar fuera del buscador (se registra
+// una sola vez, no en cada render).
+document.addEventListener("click", ev => {
+  if(ev.target.closest && ev.target.closest(".searchwrap")) return;
+  document.querySelectorAll(".searchresults").forEach(r => { r.hidden = true; });
+});
+
+// Lleva a la vista de calendario que corresponde al rol, con la ventana de
+// 3 dias empezando en el dia de la cita, y deja la cita resaltada.
+function irACitaDeCliente(c){
+  const dt = parseFechaCita(c.fechaCita);
+  if(CURRENT_USER.type === "admin" && clienteSinManager(c)){
+    avisoBusqueda(c, "⚠️ Cliente sin manager asignado",
+      `<b>${esc(c.nombre)}</b> no tiene ningún manager asignado${c.manager ? ` (figura "${esc(c.manager)}", que ya no existe)` : ""}, por eso no aparece en el Calendario General. Abre su ficha para asignárselo a un manager.`);
+    return;
+  }
+  if(!dt){
+    avisoBusqueda(c, "⚠️ Fecha de cita no válida",
+      `La cita de <b>${esc(c.nombre)}</b> no tiene una fecha que se pueda leer ("${esc(c.fechaCita||"vacía")}"), así que no se puede ubicar en el calendario.`);
+    return;
+  }
+  highlightClientId = c.id;
+  calendarStart = fechaCitaDia(dt);
+  if(CURRENT_USER.type === "admin"){
+    calendarManagerView = null;
+    calendarOpen = true;
+  } else if(CURRENT_USER.type === "manager"){
+    calendarOpen = true;
+  } else {
+    subgestorListOpen = false;
+  }
+  render();
+  const el = document.querySelector(".resaltado");
+  if(el) el.scrollIntoView({behavior:"smooth", block:"center", inline:"center"});
+}
+
+function avisoBusqueda(c, titulo, html){
+  const body = document.createElement("div");
+  body.innerHTML = `
+  <h3>${titulo}</h3>
+  <p style="font-size:13.5px;">${html}</p>
+  <div class="modalbtns">
+  <button class="btncancel" id="abCerrar">Cerrar</button>
+  <button class="btnok" id="abFicha">Abrir ficha</button>
+  </div>
+  `;
+  const close = showModal(body);
+  body.querySelector("#abCerrar").onclick = close;
+  body.querySelector("#abFicha").onclick = () => { close(); openClientDetailModal(c); };
 }
 
 function openMenuModal(){
@@ -1192,7 +1339,7 @@ function renderCalendarStrip(title, managerNames){
         const topPct = ((mins - CAL_START_MIN) / (CAL_END_MIN - CAL_START_MIN)) * 100;
         const heightPct = (CAL_BLOCK_MIN / (CAL_END_MIN - CAL_START_MIN)) * 100;
         const block = document.createElement("div");
-        block.className = "calBlock";
+        block.className = "calBlock" + (it.c.id === highlightClientId ? " resaltado" : "");
         block.style.top = topPct + "%";
         block.style.height = heightPct + "%";
         block.style.left = (colIndex * 100 / colCount) + "%";
@@ -1355,7 +1502,7 @@ function renderHorarioLista(managerName, title, onBack, extraButtons){
       const entries = bySlot.get(slotMin) || [];
       entries.forEach(it => {
         const entry = document.createElement("div");
-        entry.className = "miHorarioEntry" + (it.c.choqueHorario ? " choque" : "");
+        entry.className = "miHorarioEntry" + (it.c.choqueHorario ? " choque" : "") + (it.c.id === highlightClientId ? " resaltado" : "");
         entry.innerHTML = `${it.c.choqueHorario ? "⚠️ " : ""}${esc(it.c.nombre)}<span class="miHorarioCity">${esc(cityFromDireccion(it.c.direccion))}</span>`;
         entry.onclick = () => openClientDetailModal(it.c);
         entryWrap.appendChild(entry);

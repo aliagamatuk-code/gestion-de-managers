@@ -40,6 +40,25 @@
   header.top .brand{display:flex;flex-direction:column;line-height:1.2;}
   header.top .brand b{font-size:16px;letter-spacing:.2px;}
   header.top .brand span{font-size:11.5px;opacity:.85;}
+  header.top{flex-wrap:wrap;row-gap:10px;}
+  /* Buscador de clientes (arriba, en la barra fija) */
+  .searchwrap{position:relative;flex-basis:100%;}
+  .searchinput{width:100%;padding:9px 12px;border:none;border-radius:10px;font-size:14px;
+    font-family:inherit;color:var(--ink);background:#fff;}
+  .searchresults{position:absolute;top:calc(100% + 6px);left:0;right:0;background:#fff;
+    color:var(--ink);border-radius:12px;box-shadow:0 8px 24px rgba(0,0,0,.2);
+    max-height:60vh;overflow-y:auto;z-index:50;}
+  .searchrow{display:block;width:100%;text-align:left;border:none;background:#fff;
+    padding:10px 12px;border-bottom:1px solid var(--line);cursor:pointer;font-family:inherit;color:var(--ink);}
+  .searchrow:hover,.searchrow:focus{background:var(--teal-light);}
+  .searchrow b{display:block;font-size:13.5px;}
+  .searchrow span{font-size:11.5px;color:var(--muted);}
+  .searchwarn{color:var(--danger);font-weight:700;}
+  .searchempty{padding:12px;font-size:13px;color:var(--muted);}
+  /* Cita elegida en el buscador */
+  .calBlock.resaltado,.miHorarioEntry.resaltado{outline:3px solid #FFC400;outline-offset:1px;
+    z-index:5;animation:resaltar 1s ease-in-out 3;}
+  @keyframes resaltar{50%{outline-color:#FF6D00;transform:scale(1.04);}}
   .iconbtn{background:rgba(255,255,255,.18);border:none;color:#fff;border-radius:10px;
     padding:8px 10px;font-size:13px;cursor:pointer;display:flex;align-items:center;gap:6px;}
   .iconbtn:active{background:rgba(255,255,255,.32);}
