@@ -124,6 +124,13 @@ const db = parseFechaCita(b);
 return !!(da && db && da.getTime() === db.getTime());
 }
 
+// Si GHL manda una etiqueta sin resolver (ej. "{{contact.cargado_por}}"),
+// la tratamos como vacia.
+function limpiarEtiqueta(v: any): string {
+const t = (v || "").toString().trim();
+return t.includes("{{") ? "" : t;
+}
+
 async function managerFromCalendarId(calendarId: string): Promise<string> {
 if (!calendarId) return "";
 try {
@@ -173,6 +180,21 @@ customData.fechaCita ||
 ).toString().trim();
 const idioma = (customData.idioma || "").toString().trim();
 const notas = (customData.notas || "").toString().trim();
+
+// FUENTE DE LA CITA (de donde salio el cliente). Se decide UNA sola vez,
+// cuando el cliente se crea, y despues nunca cambia (ni al reagendar, ni
+// al derivar a un sub-gestor). Es la base para saber que citas son de
+// Omar y cuales las consiguio un sub-gestor por su cuenta.
+// - cargadoPor: llega lleno SOLO cuando la cita se agendo desde Quantica
+//   Rutas, cuyo boton "Cita efectiva" agrega ?cargado_por=<nombre> al link
+//   del calendario. GHL lo guarda en el campo escondido "Cargado por" del
+//   formulario y el workflow lo manda aca.
+// - calendarName: el nombre del calendario de GHL por donde entro la cita.
+// (Las etiquetas sin resolver se limpian con limpiarEtiqueta, arriba.)
+const cargadoPor = limpiarEtiqueta(customData.cargadoPor);
+const calendarName = limpiarEtiqueta(customData.calendarName);
+const fuenteTipo = cargadoPor ? "subgestor" : "calendario";
+const fuente = cargadoPor || calendarName || "Calendario (nombre no recibido)";
 
 const managerDirecto = (customData.manager || "").toString().trim();
 
@@ -338,6 +360,11 @@ creadoEn: Date.now(),
 // varias zonas (como "Water Quality Assessment" o su version RP),
 // donde el manager asignado puede necesitar corregirse despues.
 calendarId,
+// Fuente de la cita (ver explicacion arriba, junto a "cargadoPor").
+fuente,
+fuenteTipo,
+cargadoPor,
+calendarName,
 };
 
 // Este guardado escribe SOLO la llave de este cliente nuevo. No toca

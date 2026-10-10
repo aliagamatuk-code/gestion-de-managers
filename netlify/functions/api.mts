@@ -303,6 +303,14 @@ export default async (req: Request, context: Context) => {
             }
           }
           delete body.confirmarChoque;
+          // La FUENTE de la cita (de donde salio el cliente) se fija una sola
+          // vez, cuando el cliente nace, y nunca se cambia desde la app: asi
+          // ninguna edicion posterior puede convertir una cita de un
+          // sub-gestor en una de Omar, ni al reves.
+          delete body.fuente;
+          delete body.fuenteTipo;
+          delete body.cargadoPor;
+          delete body.calendarName;
 
           client = { ...existing, ...body };
           if ("estado" in body) client.resultadoRegistradoEn = Date.now();
@@ -387,6 +395,10 @@ export default async (req: Request, context: Context) => {
             // tienen, y por eso en pantalla quedan despues de cualquier cliente
             // nuevo, sin necesidad de tocar sus datos.
             creadoEn: Date.now(),
+            // Cliente cargado a mano en esta app (boton "Agregar cliente" o
+            // "Pegar y cargar con IA"), no por un calendario de GHL.
+            fuente: "Carga manual en la app",
+            fuenteTipo: "manual",
           };
 
           // Mismo aviso por SMS que en la reasignacion, pero para un

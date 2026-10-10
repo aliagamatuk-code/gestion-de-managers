@@ -1535,6 +1535,7 @@ function renderClientCard(c){
   ${c.direccion ? `📍 ${esc(c.direccion)}<br>` : ""}
   ${c.fechaCita ? `🗓️ ${esc(c.fechaCita)}<br>` : ""}
   ${c.idioma ? `🗣️ Idioma: ${esc(c.idioma)}<br>` : ""}
+  ${c.fuente ? `🔖 Fuente: ${esc(c.fuente)}<br>` : ""}
   ${c.notas ? `📝 ${esc(c.notas)}` : ""}
   </div>
   ${vencido ? '<div class="vencidoflag">🔴 Cita vencida sin actualizar</div>' : ""}
@@ -2482,7 +2483,7 @@ function openInstallModal(){
 /* ===================== EXCEL EXPORT ===================== */
 const EXCEL_HEADERS = ["#","Manager","Nombre","Teléfono","Dirección","Fecha Cita","Idioma","Notas","Estado",
   "Fecha de pago","Día de pago","Monto pagado","Forma de pago","Observaciones",
-  "Sub-gestor asignado","Derivado el"];
+  "Sub-gestor asignado","Derivado el","Fuente","Tipo de fuente"];
 
 function buildClientSheet(clients){
   const rows = [EXCEL_HEADERS];
@@ -2494,7 +2495,9 @@ function buildClientSheet(clients){
     c.pagoForma || "",
     c.observaciones || "",
     c.subgestorNombre || "",
-    c.derivadoEn ? new Date(c.derivadoEn).toLocaleString("es") : ""
+    c.derivadoEn ? new Date(c.derivadoEn).toLocaleString("es") : "",
+    c.fuente || "",
+    ({calendario:"Calendario (tuya)", subgestor:"Sub-gestor", manual:"Carga manual"})[c.fuenteTipo] || ""
   ]));
   return XLSX.utils.aoa_to_sheet(rows);
 }

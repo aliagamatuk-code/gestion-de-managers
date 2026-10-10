@@ -19,6 +19,7 @@ export function mensajeAvisoAsignacion(client: any): string {
     client.direccion ? `Dirección: ${client.direccion}` : "",
     client.fechaCita ? `Fecha y hora: ${client.fechaCita}` : "",
     client.idioma ? `Idioma preferido: ${client.idioma}` : "",
+    client.fuente ? `Fuente: ${client.fuente}` : "",
   ].filter(Boolean);
   return partes.join("\n");
 }
