@@ -7,6 +7,7 @@ addManagerIfMissing,
 findDuplicate,
 newId,
 normName,
+parseFechaCita,
 } from "./_store-helpers.mts";
 
 function json(body: any, status = 200) {
@@ -104,6 +105,24 @@ WI: "Carlos Buenaventura",
 MI: "Carlos Buenaventura",
 },
 };
+
+// Estados en los que un cliente que ya existe puede "reagendar" desde
+// GHL (ver el bloque de duplicados mas abajo). Los demas ("Vendido
+// pendiente de pago", "Pagado", "No se vendió") son cierres y no se tocan.
+const ESTADOS_REAGENDABLES = ["No atendió", "Activo", "Pendiente", "Reprogramado"];
+
+// Dos fechas de cita se consideran la MISMA si son el mismo texto, o si
+// ambas se pueden leer y caen en el mismo instante (por si GHL manda la
+// misma cita escrita en otro formato). Asi no se marca "Reprogramado" a
+// un cliente que en realidad no cambio su cita.
+function mismaFechaCita(guardada: any, nueva: string): boolean {
+const a = (guardada || "").toString().trim();
+const b = (nueva || "").toString().trim();
+if (a === b) return true;
+const da = parseFechaCita(a);
+const db = parseFechaCita(b);
+return !!(da && db && da.getTime() === db.getTime());
+}
 
 async function managerFromCalendarId(calendarId: string): Promise<string> {
 if (!calendarId) return "";
@@ -249,6 +268,48 @@ await addManagerIfMissing(manager);
 const existingClients = await getAllClients();
 const dupe = findDuplicate(existingClients, nombre, telefono, null);
 if (dupe) {
+// CLIENTE QUE REAGENDA: si el cliente ya existe, la fecha que llega es
+// distinta a la guardada y todavia esta "en juego" (no se cerro con
+// venta/pago/no venta), actualizamos su cita en vez de ignorarla. Esto
+// pasa, por ejemplo, cuando reagenda desde el link del SMS de
+// recuperacion de "No atendió".
+// - El estado pasa a "Reprogramado": asi la recuperacion por SMS deja
+//   de mandarle mensajes (solo actua sobre "No atendió", ver
+//   debeEnviarAhora en _recuperacion.mts).
+// - Se conserva SIEMPRE el manager actual del cliente (y su
+//   sub-gestor), aunque la cita nueva haya llegado por el calendario de
+//   otro manager.
+// - Se conserva todo lo demas; direccion, idioma y calendarId solo se
+//   reemplazan si llegan con datos.
+// Si el estado es "Vendido pendiente de pago", "Pagado" o "No se
+// vendió", o la fecha llega vacia o es la misma, no se toca nada.
+if (
+ESTADOS_REAGENDABLES.includes(dupe.estado) &&
+fechaCita &&
+!mismaFechaCita(dupe.fechaCita, fechaCita)
+) {
+const updated = {
+...dupe,
+fechaCita,
+estado: "Reprogramado",
+...(direccion ? { direccion } : {}),
+...(idioma ? { idioma } : {}),
+...(calendarId ? { calendarId } : {}),
+};
+console.log(
+"Cita reagendada para cliente existente.",
+JSON.stringify({
+clientId: dupe.id,
+manager: dupe.manager,
+estadoAnterior: dupe.estado,
+fechaAnterior: dupe.fechaCita,
+fechaNueva: fechaCita,
+})
+);
+// Igual que el alta, escribe SOLO la llave de este cliente.
+await saveClient(updated);
+return json({ ok: true, created: false, updated: true, clientId: dupe.id });
+}
 return json({ ok: true, created: false, duplicate: true, clientId: dupe.id });
 }
 
