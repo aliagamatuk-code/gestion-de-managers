@@ -9,6 +9,7 @@ newId,
 normName,
 parseFechaCita,
 } from "./_store-helpers.mts";
+import { mensajeAvisoAsignacion, enviarAvisoAsignacion } from "./_avisos.mts";
 
 function json(body: any, status = 200) {
 return new Response(JSON.stringify(body), {
@@ -371,6 +372,25 @@ calendarName,
 // ninguna otra llave, asi que no puede borrar cambios que otra persona
 // (o otra cita) haya guardado al mismo tiempo.
 await saveClient(client);
+
+// AVISO INMEDIATO por SMS al manager dueno del calendario, cuando se
+// registra una cita NUEVA. Es el mismo aviso que ya se manda al
+// reasignar o al cargar un cliente a mano desde la app. Se manda DESPUES
+// de guardar, y si falla (sin telefono, GHL caido, etc.) NUNCA afecta el
+// guardado ni la respuesta a GHL: enviarAvisoAsignacion no lanza error.
+try {
+const managersAviso = await getManagers();
+const mgrAviso = managersAviso.find((m) => m.name === manager);
+if (mgrAviso && mgrAviso.telefono) {
+await enviarAvisoAsignacion(mgrAviso.telefono, mensajeAvisoAsignacion(client));
+} else {
+console.warn(
+`AVISO: cita nueva para "${manager}" sin SMS inmediato: ese manager no tiene telefono cargado.`
+);
+}
+} catch (e: any) {
+console.warn("AVISO: no se pudo preparar el SMS inmediato de cita nueva", e && e.message);
+}
 
 return json({ ok: true, created: true, duplicate: false, clientId: client.id });
 };
