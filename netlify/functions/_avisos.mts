@@ -38,25 +38,59 @@ export async function enviarAvisoAsignacion(telefono: string, mensaje: string): 
     return false;
   }
   console.log("AVISO: intentando enviar SMS de asignacion a", telefono);
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 8000);
-  try {
-    const r = await fetch(webhookUrl, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ phone: telefono, message: mensaje }),
-      signal: controller.signal,
-    });
-    if (!r.ok) {
-      console.warn("AVISO: fallo el envio de SMS de asignacion", r.status);
-      return false;
+
+  // Desde el 26-oct la conexion con GHL falla de forma intermitente y al
+  // instante ("fetch failed", sin llegar a GHL). Por eso se reintenta, pero
+  // SOLO cuando es seguro hacerlo (para no mandar el SMS dos veces):
+  //  - error de conexion: la orden no llego a GHL -> se reintenta.
+  //  - GHL respondio 429 o 5xx -> se reintenta.
+  //  - tiempo agotado (abort) o 4xx -> NO se reintenta (podria haber llegado).
+  // Hay un tope de tiempo total para no alargar la respuesta de la funcion.
+  const MAX_INTENTOS = 3;
+  const PAUSAS_MS = [600, 1500];
+  const TOPE_TOTAL_MS = 12000;
+  const inicio = Date.now();
+
+  for (let intento = 1; intento <= MAX_INTENTOS; intento++) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 6000);
+    let reintentable = false;
+    try {
+      const r = await fetch(webhookUrl, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ phone: telefono, message: mensaje }),
+        signal: controller.signal,
+      });
+      if (r.ok) {
+        console.log(
+          "AVISO: GHL respondio OK (" + r.status + ") al webhook de asignacion" +
+            (intento > 1 ? " [salio en el intento " + intento + "]" : "")
+        );
+        return true;
+      }
+      console.warn("AVISO: fallo el envio de SMS de asignacion", r.status, "(intento " + intento + ")");
+      reintentable = r.status === 429 || r.status >= 500;
+    } catch (e: any) {
+      const causa = e?.cause?.code || e?.cause?.message || "";
+      const fueTimeout = e?.name === "AbortError";
+      console.warn(
+        "AVISO: error o tiempo agotado enviando SMS de asignacion",
+        e?.message,
+        causa ? "| causa: " + causa : "",
+        "(intento " + intento + ")"
+      );
+      reintentable = !fueTimeout;
+    } finally {
+      clearTimeout(timeoutId);
     }
-    console.log("AVISO: GHL respondio OK (" + r.status + ") al webhook de asignacion");
-    return true;
-  } catch (e: any) {
-    console.warn("AVISO: error o tiempo agotado enviando SMS de asignacion", e.message);
-    return false;
-  } finally {
-    clearTimeout(timeoutId);
+
+    if (!reintentable || intento === MAX_INTENTOS) break;
+    const pausa = PAUSAS_MS[intento - 1] ?? 1500;
+    if (Date.now() - inicio + pausa > TOPE_TOTAL_MS) break;
+    await new Promise((res) => setTimeout(res, pausa));
   }
+
+  console.warn("AVISO: NO se pudo enviar el SMS de asignacion a", telefono, "despues de los reintentos.");
+  return false;
 }
