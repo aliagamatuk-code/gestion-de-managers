@@ -304,10 +304,26 @@ export async function getAllClients(): Promise<any[]> {
 await ensureMigrated();
 const s = store();
 const { blobs } = await s.list({ prefix: "client:" });
-const clients = await Promise.all(
-blobs.map((b: any) => s.get(b.key, { type: "json" }))
+// Antes se pedian TODOS los clientes a la vez (mas de 1,000 lecturas
+// simultaneas). Eso satura las conexiones de la funcion y se sospecha que
+// causa fallos intermitentes ("fetch failed") al mandar SMS justo despues.
+// Ahora se lee por tandas de CONCURRENCIA_LECTURA a la vez, en el mismo
+// orden y con el mismo resultado que antes. Si una lectura falla, falla
+// todo igual que antes (no se devuelven datos a medias).
+const CONCURRENCIA_LECTURA = 40;
+const resultados: any[] = new Array(blobs.length);
+let siguiente = 0;
+const trabajador = async () => {
+while (true) {
+const i = siguiente++;
+if (i >= blobs.length) return;
+resultados[i] = await s.get(blobs[i].key, { type: "json" });
+}
+};
+await Promise.all(
+Array.from({ length: Math.min(CONCURRENCIA_LECTURA, blobs.length) }, trabajador)
 );
-return clients.filter(Boolean);
+return resultados.filter(Boolean);
 }
 
 export async function getClient(id: string): Promise<any> {
