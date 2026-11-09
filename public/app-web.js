@@ -40,6 +40,7 @@ const VEINTICUATRO_HORAS_MS = 24*60*60*1000;
 let STATE = null;          // {managers:[], clients:[]}
 let CURRENT_USER = null;   // {type:'admin'} or {type:'manager', name:'...', token:'...'}
 let openCards = new Set();
+let agendaVista = "calendario"; // "calendario" (cuadricula por horas) o "lista" en la agenda de manana
 let calendarOpen = false;  // si se esta mostrando "Calendario General" (admin) / "Mi horario" (manager)
 let calendarStart = null;  // "yyyy-mm-dd" del primer dia visible de la ventana de 3 dias
 let calendarManagerView = null; // nombre del manager cuyo horario individual esta viendo el admin, o null
@@ -1312,8 +1313,8 @@ function renderCitasMananaPorCiudad(){
     });
   box.appendChild(leyenda);
 
-  // Agenda por hora: una tarjeta por cita, pintada del color de su estado.
-  info.forEach(x => {
+  // Tarjeta de una cita, pintada del color de su estado.
+  function tarjeta(x){
     const c = x.c;
     const dt = parseFechaCita(c.fechaCita);
     const hora = dt ? dt.toLocaleTimeString("es", {hour:"2-digit", minute:"2-digit"}) : "";
@@ -1322,7 +1323,7 @@ function renderCitasMananaPorCiudad(){
     card.style.cssText =
       `display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap;` +
       `border-left:6px solid ${x.color};background:${x.color}${derivada ? "10" : "26"};` +
-      `border-radius:8px;padding:8px 10px;margin:6px 0;` + (derivada ? "opacity:.75;" : "");
+      `border-radius:8px;padding:8px 10px;margin:4px 0;` + (derivada ? "opacity:.75;" : "");
     const quien = esAdmin ? ` · ${esc(c.manager)}` : "";
     const choque = c.choqueHorario ? ' <span class="choqueflag">⚠️ Cruce de horario</span>' : "";
     const estadoTarj = derivada
@@ -1344,8 +1345,55 @@ function renderCitasMananaPorCiudad(){
       b.onclick = () => openDerivarModal(c);
       card.appendChild(b);
     }
-    box.appendChild(card);
+    return card;
+  }
+
+  // Selector de vista: calendario (cuadricula por horas) o lista simple.
+  const toggle = document.createElement("div");
+  toggle.style.cssText = "display:flex;gap:6px;margin-bottom:8px;";
+  [["calendario","🗓️ Calendario"],["lista","📋 Lista"]].forEach(([k, label]) => {
+    const b = document.createElement("button");
+    b.className = "miniBtn";
+    b.textContent = label;
+    if(agendaVista === k) b.style.cssText = "background:var(--ink,#1f2d33);color:#fff;";
+    b.onclick = () => { agendaVista = k; render(); };
+    toggle.appendChild(b);
   });
+  box.appendChild(toggle);
+
+  if(agendaVista === "lista"){
+    info.forEach(x => box.appendChild(tarjeta(x)));
+    return box;
+  }
+
+  // Calendario: filas cada 30 min (8:00 am - 9:00 pm), como el calendario de
+  // siempre, con cada cita en su hora y pintada del color de su estado.
+  const porSlot = new Map();
+  info.forEach(x => {
+    const dt = parseFechaCita(x.c.fechaCita);
+    const slot = slotForMinutes(minutesOfDay(dt));
+    if(!porSlot.has(slot)) porSlot.set(slot, []);
+    porSlot.get(slot).push(x);
+  });
+  const grid = document.createElement("div");
+  grid.style.cssText = "border:1px solid var(--line);border-radius:10px;overflow:hidden;";
+  buildTimeSlots().forEach(slotMin => {
+    const items = porSlot.get(slotMin) || [];
+    const row = document.createElement("div");
+    row.style.cssText =
+      `display:flex;gap:8px;align-items:flex-start;padding:${items.length ? "4px 8px" : "2px 8px"};` +
+      "border-top:1px solid var(--line);";
+    const t = document.createElement("span");
+    t.style.cssText = "flex:none;width:54px;font-size:11px;color:var(--muted);padding-top:6px;";
+    t.textContent = formatSlotLabel(slotMin);
+    row.appendChild(t);
+    const cont = document.createElement("div");
+    cont.style.cssText = "flex:1;min-width:0;";
+    items.forEach(x => cont.appendChild(tarjeta(x)));
+    row.appendChild(cont);
+    grid.appendChild(row);
+  });
+  box.appendChild(grid);
   return box;
 }
 
