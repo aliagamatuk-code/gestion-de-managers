@@ -52,15 +52,24 @@ let highlightClientId = null;
 
 /* ===================== STORAGE HELPERS (real backend via /api) ===================== */
 async function loadShared(token){
-  try{
-    const url = token ? ('/api/data?token=' + encodeURIComponent(token)) : '/api/data';
-    // cache:'no-store' obliga al navegador a pedir SIEMPRE los datos
-    // reales al servidor, nunca una copia guardada en el celular/PC.
-    const r = await fetch(url, { cache: 'no-store' });
-    const data = await r.json().catch(()=>null);
-    if(!r.ok) return data || { error: "network" };
-    return data;
-  }catch(e){ return null; }
+  // Si la conexion falla o el servidor responde con error 5xx, se reintenta
+  // hasta 3 veces (con una pausa corta) antes de rendirse. Un link invalido
+  // (401/404) NO se reintenta.
+  const url = token ? ('/api/data?token=' + encodeURIComponent(token)) : '/api/data';
+  let ultimo = null;
+  for(let intento = 1; intento <= 3; intento++){
+    try{
+      // cache:'no-store' obliga al navegador a pedir SIEMPRE los datos
+      // reales al servidor, nunca una copia guardada en el celular/PC.
+      const r = await fetch(url, { cache: 'no-store' });
+      const data = await r.json().catch(()=>null);
+      if(r.ok) return data;
+      ultimo = data || { error: "network" };
+      if(r.status < 500) return ultimo;
+    }catch(e){ ultimo = null; }
+    if(intento < 3) await new Promise(res => setTimeout(res, 1500));
+  }
+  return ultimo;
 }
 
 function saveManagerToken(t){ try{ localStorage.setItem(MGR_TOKEN_KEY, t); }catch(e){} }
@@ -360,6 +369,12 @@ function isDerivacionVencida(c){
 
 /* ===================== INIT ===================== */
 async function init(){
+  // Mientras llegan los datos (puede tardar varios segundos) se muestra un
+  // aviso, para que no parezca que la app "no abre".
+  const rootEl = document.getElementById("root");
+  if(rootEl && !rootEl.innerHTML.trim()){
+    rootEl.innerHTML = '<div class="lockwrap"><h1>Gestión de Managers</h1><p>Cargando tus citas… puede tardar unos segundos, no cierres la pantalla.</p></div>';
+  }
   // Si el link trae "?m=CODIGO", esta persona entro por el link
   // personal de un manager. Guardamos ese codigo en el dispositivo
   // (para que no tenga que reabrir el link cada vez) y limpiamos la
@@ -1318,7 +1333,9 @@ function renderCitasMananaPorCiudad(){
     left.innerHTML =
       `<div style="font-size:13.5px;"><b>${esc(hora)}</b> — ${esc(c.nombre)}</div>` +
       `<div class="cmeta" style="color:${x.color};font-weight:600;">${ciudadLinea}${quien}</div>` +
-      `<div class="cmeta">${esc(c.direccion || "")}</div>${estadoTarj}`;
+      `<div class="cmeta">${esc(c.direccion || "")}</div>` +
+      (c.idioma ? `<div class="cmeta">🗣️ Idioma: ${esc(c.idioma)}</div>` : "") +
+      estadoTarj;
     card.appendChild(left);
     if(!derivada && puedeDerivar){
       const b = document.createElement("button");
