@@ -1213,16 +1213,28 @@ function ciudadDeDireccion(direccion){
   return estado ? ciudad + ", " + estado : ciudad;
 }
 
-const CIUDAD_PALETA = [
-  "#2E6FC4","#1E8A5A","#C4472B","#7B4FC9","#D98B1F","#0E8FA3",
-  "#B5398A","#6B8E23","#8D6346","#D14B6A","#4A5FD0","#3D8B8B"
+const ESTADO_PALETA = [
+  "#2E6FC4","#D98B1F","#1E8A5A","#7B4FC9","#C4472B","#0E8FA3",
+  "#B5398A","#8D6346","#4A5FD0","#6B8E23","#D14B6A","#3D8B8B"
 ];
-// Color estable por ciudad: la misma ciudad SIEMPRE sale con el mismo color.
-function colorDeCiudad(nombre){
-  const k = (nombre || "").toLowerCase();
-  let h = 0;
-  for(let i = 0; i < k.length; i++) h = (h * 31 + k.charCodeAt(i)) >>> 0;
-  return CIUDAD_PALETA[h % CIUDAD_PALETA.length];
+// Colores fijos para los estados donde Omar mas trabaja: siempre el mismo color.
+const ESTADO_COLOR_FIJO = {
+  "Wisconsin":"#2E6FC4","Michigan":"#D98B1F","Ohio":"#1E8A5A","Pennsylvania":"#7B4FC9",
+  "North Carolina":"#C4472B","New Jersey":"#0E8FA3","Georgia":"#B5398A","Colorado":"#8D6346",
+  "Connecticut":"#4A5FD0","Delaware":"#6B8E23","New York":"#D14B6A","Florida":"#3D8B8B"
+};
+// Un color por ESTADO (todas las citas del mismo estado, el mismo color).
+function colorDeEstado(estado){
+  if(!estado) return "#8A8F98";
+  if(ESTADO_COLOR_FIJO[estado]) return ESTADO_COLOR_FIJO[estado];
+  const i = ESTADOS_USA.indexOf(estado);
+  return ESTADO_PALETA[(i >= 0 ? i : 0) % ESTADO_PALETA.length];
+}
+// De "Ciudad, Estado" saca el estado; null si la direccion no se pudo leer.
+function estadoDeCiudadTxt(ciudadTxt){
+  if(!ciudadTxt) return null;
+  const i = ciudadTxt.lastIndexOf(", ");
+  return i >= 0 ? ciudadTxt.slice(i + 2) : null;
 }
 
 function esCitaDelDia(c, ds){
@@ -1243,73 +1255,80 @@ function renderCitasMananaPorCiudad(){
   const box = document.createElement("div");
   box.className = "summarybox";
   if(citas.length === 0){
-    box.innerHTML = `<h3>🗓️ Citas de mañana</h3><div class="emptynote">Sin citas agendadas para mañana.</div>`;
+    box.innerHTML = `<h3>🗓️ Agenda de mañana</h3><div class="emptynote">Sin citas agendadas para mañana.</div>`;
     return box;
   }
 
   const dtM = parseFechaCita(citas[0].fechaCita);
   const diaTxt = dtM ? dtM.toLocaleDateString("es", {weekday:"long", day:"numeric", month:"long"}) : "";
-  const sinDerivar = citas.filter(c => !c.subgestorId);
-  const derivadas = citas.filter(c => c.subgestorId);
-
+  const porDerivar = citas.filter(c => !c.subgestorId).length;
   const head = document.createElement("h3");
-  head.textContent = `🗓️ Citas de mañana (${citas.length}) — ${diaTxt}`;
+  head.textContent = `🗓️ Agenda de mañana (${citas.length}) — ${diaTxt}`;
   box.appendChild(head);
+  const sub = document.createElement("div");
+  sub.className = "cmeta";
+  sub.style.marginBottom = "8px";
+  sub.textContent = `${porDerivar} por derivar · ${citas.length - porDerivar} ya derivadas`;
+  box.appendChild(sub);
 
-  function agrupar(lista){
-    const grupos = {};
-    lista.forEach(c => {
-      const ciudad = ciudadDeDireccion(c.direccion);
-      const key = ciudad ? ciudad.toLowerCase() : "__sin__";
-      if(!grupos[key]) grupos[key] = { ciudad: ciudad || "Sin ciudad detectada", items: [], sin: !ciudad };
-      grupos[key].items.push(c);
+  // Datos de cada cita (ciudad y estado se sacan de la direccion).
+  const info = citas.map(c => {
+    const ciudadTxt = ciudadDeDireccion(c.direccion);
+    const estado = estadoDeCiudadTxt(ciudadTxt);
+    return { c, ciudadTxt, estado, color: colorDeEstado(estado) };
+  });
+
+  // Leyenda: un color por estado, con cuantas citas tiene cada uno.
+  const conteo = {};
+  info.forEach(x => {
+    const k = x.estado || "Sin estado detectado";
+    if(!conteo[k]) conteo[k] = { n: 0, color: x.color };
+    conteo[k].n++;
+  });
+  const leyenda = document.createElement("div");
+  leyenda.style.cssText = "display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px;";
+  Object.keys(conteo)
+    .sort((a,b) => conteo[b].n - conteo[a].n || a.localeCompare(b))
+    .forEach(k => {
+      const chip = document.createElement("span");
+      chip.style.cssText = `background:${conteo[k].color};color:#fff;border-radius:999px;padding:3px 10px;font-size:12px;font-weight:700;`;
+      chip.textContent = `${k} (${conteo[k].n})`;
+      leyenda.appendChild(chip);
     });
-    // Ciudades con mas citas primero; "Sin ciudad detectada" siempre al final.
-    return Object.values(grupos).sort((a,b) =>
-      (a.sin - b.sin) || (b.items.length - a.items.length) || a.ciudad.localeCompare(b.ciudad));
-  }
+  box.appendChild(leyenda);
 
-  function pintarSeccion(titulo, lista, conBoton){
-    if(lista.length === 0) return;
-    const t = document.createElement("div");
-    t.className = "listsubtitle";
-    t.textContent = `${titulo} (${lista.length})`;
-    box.appendChild(t);
-    agrupar(lista).forEach(g => {
-      const color = g.sin ? "#8A8F98" : colorDeCiudad(g.ciudad);
-      const bloque = document.createElement("div");
-      bloque.style.cssText = `border-left:5px solid ${color};border-radius:6px;margin:8px 0;padding:2px 0 2px 10px;`;
-      const gh = document.createElement("div");
-      gh.style.cssText = `font-weight:700;font-size:13px;color:${color};margin:4px 0;`;
-      gh.textContent = `📍 ${g.ciudad} (${g.items.length})`;
-      bloque.appendChild(gh);
-      g.items.forEach(c => {
-        const dt = parseFechaCita(c.fechaCita);
-        const hora = dt ? dt.toLocaleTimeString("es", {hour:"2-digit", minute:"2-digit"}) : "";
-        const row = document.createElement("div");
-        row.className = "citahoyrow";
-        row.style.cssText = "display:flex;gap:8px;align-items:center;justify-content:space-between;flex-wrap:wrap;";
-        const quien = esAdmin ? ` · ${esc(c.manager)}` : "";
-        const asignado = c.subgestorId ? ` · Sub-gestor: ${esc(c.subgestorNombre||"")}` : "";
-        const choque = c.choqueHorario ? ' <span class="choqueflag">⚠️ Cruce de horario</span>' : "";
-        const info = document.createElement("div");
-        info.innerHTML = `<b>${esc(hora)}</b> — ${esc(c.nombre)}<div class="cmeta">${esc(c.direccion || "")}${quien}${asignado}${choque}</div>`;
-        row.appendChild(info);
-        if(conBoton && puedeDerivar){
-          const b = document.createElement("button");
-          b.className = "miniBtn";
-          b.textContent = "↪️ Derivar";
-          b.onclick = () => openDerivarModal(c);
-          row.appendChild(b);
-        }
-        bloque.appendChild(row);
-      });
-      box.appendChild(bloque);
-    });
-  }
-
-  pintarSeccion("🟠 Por derivar", sinDerivar, true);
-  pintarSeccion("✅ Ya derivadas", derivadas, false);
+  // Agenda por hora: una tarjeta por cita, pintada del color de su estado.
+  info.forEach(x => {
+    const c = x.c;
+    const dt = parseFechaCita(c.fechaCita);
+    const hora = dt ? dt.toLocaleTimeString("es", {hour:"2-digit", minute:"2-digit"}) : "";
+    const derivada = !!c.subgestorId;
+    const card = document.createElement("div");
+    card.style.cssText =
+      `display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap;` +
+      `border-left:6px solid ${x.color};background:${x.color}${derivada ? "10" : "26"};` +
+      `border-radius:8px;padding:8px 10px;margin:6px 0;` + (derivada ? "opacity:.75;" : "");
+    const quien = esAdmin ? ` · ${esc(c.manager)}` : "";
+    const choque = c.choqueHorario ? ' <span class="choqueflag">⚠️ Cruce de horario</span>' : "";
+    const estadoTarj = derivada
+      ? `<div class="cmeta">✅ Derivada a ${esc(c.subgestorNombre || "")}${choque}</div>`
+      : (choque ? `<div class="cmeta">${choque}</div>` : "");
+    const ciudadLinea = x.ciudadTxt ? `📍 ${esc(x.ciudadTxt)}` : "📍 Ciudad no detectada";
+    const left = document.createElement("div");
+    left.innerHTML =
+      `<div style="font-size:13.5px;"><b>${esc(hora)}</b> — ${esc(c.nombre)}</div>` +
+      `<div class="cmeta" style="color:${x.color};font-weight:600;">${ciudadLinea}${quien}</div>` +
+      `<div class="cmeta">${esc(c.direccion || "")}</div>${estadoTarj}`;
+    card.appendChild(left);
+    if(!derivada && puedeDerivar){
+      const b = document.createElement("button");
+      b.className = "miniBtn";
+      b.textContent = "↪️ Derivar";
+      b.onclick = () => openDerivarModal(c);
+      card.appendChild(b);
+    }
+    box.appendChild(card);
+  });
   return box;
 }
 
