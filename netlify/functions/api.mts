@@ -958,5 +958,7 @@ export const config: Config = {
     "/api/backups",
     "/api/backups/restore",
     "/api/parse",
+    "/api/cache-check",
+    "/api/cache-mode",
   ],
 };
