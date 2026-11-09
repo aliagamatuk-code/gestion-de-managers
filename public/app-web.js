@@ -1366,34 +1366,84 @@ function renderCitasMananaPorCiudad(){
     return box;
   }
 
-  // Calendario: filas cada 30 min (8:00 am - 9:00 pm), como el calendario de
-  // siempre, con cada cita en su hora y pintada del color de su estado.
-  const porSlot = new Map();
+  // Calendario por ESTADO, con el mismo formato de "Mi horario": una columna
+  // por estado (cada una con su color), filas cada 30 min (8:00 am - 9:00 pm)
+  // y las citas de mañana en su hora. Cada cita muestra los datos para
+  // decidir (nombre, ciudad, idioma, si ya esta derivada) y su boton
+  // "Derivar"; al tocar la cita se abre la ficha completa (telefono,
+  // direccion, notas...) que tambien tiene Derivar/Liberar.
+  const porEstado = {};
   info.forEach(x => {
-    const dt = parseFechaCita(x.c.fechaCita);
-    const slot = slotForMinutes(minutesOfDay(dt));
-    if(!porSlot.has(slot)) porSlot.set(slot, []);
-    porSlot.get(slot).push(x);
+    const k = x.estado || "Sin estado detectado";
+    if(!porEstado[k]) porEstado[k] = { color: x.color, items: [] };
+    porEstado[k].items.push(x);
   });
-  const grid = document.createElement("div");
-  grid.style.cssText = "border:1px solid var(--line);border-radius:10px;overflow:hidden;";
-  buildTimeSlots().forEach(slotMin => {
-    const items = porSlot.get(slotMin) || [];
-    const row = document.createElement("div");
-    row.style.cssText =
-      `display:flex;gap:8px;align-items:flex-start;padding:${items.length ? "4px 8px" : "2px 8px"};` +
-      "border-top:1px solid var(--line);";
-    const t = document.createElement("span");
-    t.style.cssText = "flex:none;width:54px;font-size:11px;color:var(--muted);padding-top:6px;";
-    t.textContent = formatSlotLabel(slotMin);
-    row.appendChild(t);
-    const cont = document.createElement("div");
-    cont.style.cssText = "flex:1;min-width:0;";
-    items.forEach(x => cont.appendChild(tarjeta(x)));
-    row.appendChild(cont);
-    grid.appendChild(row);
+  const nombresEstado = Object.keys(porEstado).sort((a,b) =>
+    (a === "Sin estado detectado") - (b === "Sin estado detectado") ||
+    porEstado[b].items.length - porEstado[a].items.length || a.localeCompare(b));
+
+  const cols = document.createElement("div");
+  cols.className = "miHorarioCols";
+  const slots = buildTimeSlots();
+  nombresEstado.forEach(nombre => {
+    const grupo = porEstado[nombre];
+    const porSlot = new Map();
+    grupo.items.forEach(x => {
+      const slot = slotForMinutes(minutesOfDay(parseFechaCita(x.c.fechaCita)));
+      if(!porSlot.has(slot)) porSlot.set(slot, []);
+      porSlot.get(slot).push(x);
+    });
+
+    const col = document.createElement("div");
+    col.className = "miHorarioCol";
+    col.style.minWidth = "175px";
+    const colHead = document.createElement("div");
+    colHead.className = "miHorarioColHead";
+    colHead.style.cssText = `background:${grupo.color};color:#fff;text-transform:none;`;
+    colHead.textContent = `${nombre} (${grupo.items.length})`;
+    col.appendChild(colHead);
+
+    slots.forEach(slotMin => {
+      const row = document.createElement("div");
+      row.className = "miHorarioSlot";
+      const timeEl = document.createElement("span");
+      timeEl.className = "miHorarioTime";
+      timeEl.textContent = formatSlotLabel(slotMin);
+      row.appendChild(timeEl);
+      const entryWrap = document.createElement("div");
+      entryWrap.className = "miHorarioEntries";
+      (porSlot.get(slotMin) || []).forEach(x => {
+        const c = x.c;
+        const derivada = !!c.subgestorId;
+        const entry = document.createElement("div");
+        entry.className = "miHorarioEntry";
+        entry.style.cssText =
+          `background:${grupo.color}${derivada ? "14" : "30"};color:${grupo.color};` +
+          `border-left:4px solid ${grupo.color};` + (derivada ? "opacity:.75;" : "");
+        const dt = parseFechaCita(c.fechaCita);
+        const hora = dt ? dt.toLocaleTimeString("es", {hour:"2-digit", minute:"2-digit"}) : "";
+        entry.innerHTML =
+          `${c.choqueHorario ? "⚠️ " : ""}<b>${esc(hora)}</b> ${esc(c.nombre)}` +
+          `<span class="miHorarioCity">📍 ${esc(x.ciudadTxt || "Ciudad no detectada")}${esAdmin ? " · " + esc(c.manager) : ""}</span>` +
+          (c.idioma ? `<span class="miHorarioCity">🗣️ ${esc(c.idioma)}</span>` : "") +
+          (derivada ? `<span class="miHorarioCity">✅ Derivada a ${esc(c.subgestorNombre || "")}</span>` : "");
+        entry.onclick = () => openClientDetailModal(c);
+        if(!derivada && puedeDerivar){
+          const b = document.createElement("button");
+          b.className = "miniBtn";
+          b.style.cssText = "margin-top:4px;display:block;";
+          b.textContent = "↪️ Derivar";
+          b.onclick = (ev) => { ev.stopPropagation(); openDerivarModal(c); };
+          entry.appendChild(b);
+        }
+        entryWrap.appendChild(entry);
+      });
+      row.appendChild(entryWrap);
+      col.appendChild(row);
+    });
+    cols.appendChild(col);
   });
-  box.appendChild(grid);
+  box.appendChild(cols);
   return box;
 }
 
