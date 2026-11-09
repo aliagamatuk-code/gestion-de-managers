@@ -1684,6 +1684,20 @@ if(isSubgestor){
   el.appendChild(actions);
 }
 
+// El manager puede editar la ficha completa Y la fecha/hora de sus citas
+// (las propias y las que derivo a sus sub-gestores). Cada cambio queda
+// anotado en el servidor y sale en el aviso diario de "citas modificadas".
+if(isManager){
+  const actions = document.createElement("div");
+  actions.className = "cactions";
+  const editBtn = document.createElement("button");
+  editBtn.className = "miniBtn";
+  editBtn.textContent = "✏️ Editar cita";
+  editBtn.onclick = () => openManagerEditForm(c);
+  actions.appendChild(editBtn);
+  el.appendChild(actions);
+}
+
 return el;
 }
 
@@ -2012,6 +2026,101 @@ function openSubgestorEditForm(c){
     Object.assign(c, data);
     close(); render();
   };
+}
+
+/* ===================== EDITAR CITA (manager) ===================== */
+// Convierte una fecha a texto "Friday, October 30, 2026 3:30 PM", el mismo
+// formato que ya guardan las citas que llegan de GHL (y que entiende el
+// script de recordatorios).
+function formatFechaCitaLarga(dt){
+  const dias = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"];
+  const meses = ["January","February","March","April","May","June","July","August","September","October","November","December"];
+  let h = dt.getHours();
+  const ampm = h >= 12 ? "PM" : "AM";
+  h = h % 12; if(h === 0) h = 12;
+  const mi = String(dt.getMinutes()).padStart(2,"0");
+  return `${dias[dt.getDay()]}, ${meses[dt.getMonth()]} ${dt.getDate()}, ${dt.getFullYear()} ${h}:${mi} ${ampm}`;
+}
+function toDatetimeLocalValue(dt){
+  const p = n => String(n).padStart(2,"0");
+  return `${dt.getFullYear()}-${p(dt.getMonth()+1)}-${p(dt.getDate())}T${p(dt.getHours())}:${p(dt.getMinutes())}`;
+}
+
+function openManagerEditForm(c){
+  const actual = parseFechaCita(c.fechaCita);
+  const valorInicial = actual ? toDatetimeLocalValue(actual) : "";
+  const body = document.createElement("div");
+  body.className = "modalhead";
+  body.innerHTML = `
+  <button class="closeX" id="mefX">✕</button>
+  <h3>Editar cita — ${esc(c.nombre)}</h3>
+  <label>Nombre completo</label>
+  <input type="text" id="mefNombre" value="${esc(c.nombre)}">
+  <label>Teléfono</label>
+  <input type="tel" id="mefTelefono" value="${esc(c.telefono)}">
+  <label>Dirección</label>
+  <input type="text" id="mefDireccion" value="${esc(c.direccion)}">
+  <label>Fecha y hora de la cita</label>
+  <input type="datetime-local" id="mefFecha" value="${esc(valorInicial)}">
+  <div class="helptext">Ahora: ${esc(c.fechaCita || "sin fecha")}. Si la dejas igual, no se cambia.</div>
+  <label>Idioma preferido</label>
+  <input type="text" id="mefIdioma" placeholder="Español / Inglés" value="${esc(c.idioma)}">
+  <label>Notas</label>
+  <textarea id="mefNotas">${esc(c.notas)}</textarea>
+  <div id="mefMsg"></div>
+  <div class="modalbtns">
+  <button class="btncancel" id="mefCancel">Cancelar</button>
+  <button class="btnok" id="mefSave">Guardar</button>
+  </div>
+  `;
+  const close = showModal(body);
+  body.querySelector("#mefX").onclick = close;
+  body.querySelector("#mefCancel").onclick = close;
+  const msgBox = body.querySelector("#mefMsg");
+  const saveBtn = body.querySelector("#mefSave");
+
+  async function guardar(confirmarChoque){
+    const nombre = body.querySelector("#mefNombre").value.trim();
+    if(!nombre){ body.querySelector("#mefNombre").focus(); return; }
+    const data = {
+      id: c.id,
+      nombre,
+      telefono: body.querySelector("#mefTelefono").value.trim(),
+      direccion: body.querySelector("#mefDireccion").value.trim(),
+      idioma: body.querySelector("#mefIdioma").value.trim(),
+      notas: body.querySelector("#mefNotas").value.trim(),
+    };
+    // La fecha solo se manda si de verdad la cambiaron en el selector.
+    const fechaElegida = body.querySelector("#mefFecha").value;
+    if(fechaElegida && fechaElegida !== valorInicial){
+      const dt = new Date(fechaElegida);
+      if(!isNaN(dt.getTime())) data.fechaCita = formatFechaCitaLarga(dt);
+    }
+    if(confirmarChoque) data.confirmarChoque = true;
+    saveBtn.disabled = true;
+    saveBtn.textContent = "Guardando…";
+    msgBox.innerHTML = "";
+    const res = await saveClientRemote(data);
+    if(!res.ok){
+      const err = res.data && res.data.error;
+      if(err === "duplicate_client"){
+        msgBox.innerHTML = `<div class="dupewarn">🚫 No se puede, cliente duplicado en el manager ${esc(res.data.managerName || "")}.</div>`;
+      } else if(err === "choque_horario"){
+        msgBox.innerHTML = `<div class="dupewarn">⏰ ${esc(res.data.message || "Hay otra cita a una hora o menos de esta.")}<br><button class="miniBtn" id="mefForce" style="margin-top:6px;">Sí, guardar igual</button></div>`;
+        msgBox.querySelector("#mefForce").onclick = () => guardar(true);
+      } else {
+        msgBox.innerHTML = `<div class="dupewarn">⚠️ No se pudo guardar. Intenta de nuevo.</div>`;
+      }
+      saveBtn.disabled = false;
+      saveBtn.textContent = "Guardar";
+      return;
+    }
+    showBadge(true);
+    // Usamos el cliente que devuelve el servidor (ya trae el historial).
+    Object.assign(c, res.data && res.data.client ? res.data.client : data);
+    close(); render();
+  }
+  saveBtn.onclick = () => guardar(false);
 }
 
 /* ===================== AI BULK PASTE ===================== */

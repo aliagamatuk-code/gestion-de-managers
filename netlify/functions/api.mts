@@ -50,6 +50,39 @@ const MANAGER_ALLOWED_FIELDS = [
   "observaciones",
 ];
 
+// Campos de la FICHA (datos de la cita) que un manager tambien puede
+// editar en las citas propias y en las que derivo a sus sub-gestores.
+// A diferencia del sub-gestor, el manager SI puede cambiar la fecha/hora.
+// Cada cambio real en estos campos queda anotado en client.ediciones
+// (quien, cuando, antes y despues) para que el aviso diario de las 7 AM
+// pueda informar las "citas modificadas".
+const MANAGER_FICHA_FIELDS = [
+  "nombre",
+  "telefono",
+  "direccion",
+  "idioma",
+  "notas",
+  "fechaCita",
+];
+const MAX_EDICIONES = 20;
+
+// Campos de "resultados de gestion" (estado, pago, observaciones) ya
+// se manejan aparte; esto solo compara la ficha.
+function registrarEdicionManager(existing: any, client: any, managerName: string) {
+  const cambios: Record<string, [string, string]> = {};
+  for (const f of MANAGER_FICHA_FIELDS) {
+    if (!(f in client)) continue;
+    const antes = (existing[f] ?? "").toString().trim();
+    const despues = (client[f] ?? "").toString().trim();
+    if (antes !== despues) cambios[f] = [antes, despues];
+  }
+  if (Object.keys(cambios).length === 0) return false;
+  const lista = Array.isArray(existing.ediciones) ? existing.ediciones.slice() : [];
+  lista.push({ en: Date.now(), por: managerName, cambios });
+  client.ediciones = lista.slice(-MAX_EDICIONES);
+  return true;
+}
+
 // Campos que SI puede tocar un sub-gestor en un cliente que tiene
 // actualmente asignado (via su link personal). A diferencia del manager,
 // el sub-gestor puede editar tambien los datos de contacto/ficha (nombre,
@@ -179,8 +212,73 @@ export default async (req: Request, context: Context) => {
             for (const field of MANAGER_ALLOWED_FIELDS) {
               if (field in body) client[field] = body[field];
             }
+            // Ficha completa + fecha/hora: el manager puede editarlas en sus
+            // citas (incluidas las derivadas a sus sub-gestores, que siguen
+            // teniendo manager = el, ver arriba existing.manager === mgr.name).
+            for (const field of MANAGER_FICHA_FIELDS) {
+              if (field in body) client[field] = (body[field] ?? "").toString().trim();
+            }
+            if ("nombre" in body && !client.nombre) {
+              return json({ error: "missing_nombre" }, 400);
+            }
             if (pagoIncompleto(client)) {
               return json({ error: "pago_incompleto" }, 400);
+            }
+            const fichaCambio =
+              MANAGER_FICHA_FIELDS.some((f) => f in body &&
+                (existing[f] ?? "").toString().trim() !== client[f]);
+            if (fichaCambio) {
+              // Duplicado "amplio": igual que el administrador y el sub-gestor.
+              if (body.nombre || body.telefono || body.direccion) {
+                const existingClients = await getAllClients();
+                const dupe = findDuplicateAmplio(
+                  existingClients,
+                  client.nombre,
+                  client.telefono,
+                  client.direccion,
+                  body.id
+                );
+                if (dupe) {
+                  return json(
+                    {
+                      error: "duplicate_client",
+                      message: `No se puede, cliente duplicado en el manager ${dupe.manager}.`,
+                      managerName: dupe.manager,
+                      duplicateId: dupe.id,
+                    },
+                    409
+                  );
+                }
+              }
+              // Choque de horario solo si se cambio la fecha/hora: se compara
+              // contra las otras citas de la MISMA persona que la atiende (el
+              // sub-gestor asignado, o el manager si la tiene el directo).
+              if (
+                "fechaCita" in body &&
+                (existing.fechaCita ?? "").toString().trim() !== client.fechaCita
+              ) {
+                const todos = await getAllClients();
+                const mismas = todos.filter((cc: any) =>
+                  cc.id !== existing.id &&
+                  cc.manager === mgr.name &&
+                  (existing.subgestorId
+                    ? cc.subgestorId === existing.subgestorId
+                    : !cc.subgestorId) &&
+                  cc.estado !== "Reprogramado"
+                );
+                const choque = buscarChoqueHorario(mismas, client.fechaCita);
+                if (choque && !body.confirmarChoque) {
+                  return json(
+                    {
+                      error: "choque_horario",
+                      message: `Ya hay otra cita a las ${choque.hora}, ¿de todos modos querés usar esta hora?`,
+                      hora: choque.hora,
+                    },
+                    409
+                  );
+                }
+              }
+              registrarEdicionManager(existing, client, mgr.name);
             }
             if ("estado" in body) client.resultadoRegistradoEn = Date.now();
             // Guardamos el cambio de estado PRIMERO, antes de intentar mandar el
