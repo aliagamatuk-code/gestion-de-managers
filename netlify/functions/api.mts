@@ -20,6 +20,8 @@ import {
   findSubgestorById,
   buscarChoqueHorario,
   setManagerTelefono,
+  setCacheHabilitado,
+  getCacheHabilitado,
 } from "./_store-helpers.mts";
 import { enviarRecuperacion, marcarEnviado } from "./_recuperacion.mts";
 import { mensajeAvisoAsignacion, enviarAvisoAsignacion } from "./_avisos.mts";
@@ -782,6 +784,54 @@ export default async (req: Request, context: Context) => {
       client.choqueHorario = false;
       await saveClient(client);
       return json({ ok: true, client });
+    }
+
+    // ---- Copia rapida de clientes: comprobacion e interruptor (solo admin) ----
+    // GET  /api/cache-check  -> lee todo de las dos maneras (ficha por ficha y con
+    //                           la copia rapida), las compara y devuelve tiempos.
+    //                           No cambia ningun dato de clientes.
+    // POST /api/cache-mode   -> {"on":true|false} enciende/apaga la copia rapida.
+    if (path === "/api/cache-check" && method === "GET") {
+      if (url.searchParams.get("token")) return json({ error: "forbidden" }, 403);
+      const norm = (l: any[]) => {
+        const m = new Map<string, string>();
+        l.forEach((c: any) => m.set(c.id, JSON.stringify(c)));
+        return m;
+      };
+      const t0 = Date.now();
+      const real = await getAllClients({ sinCopia: true });
+      const msReal = Date.now() - t0;
+      const t1 = Date.now();
+      const c1 = await getAllClients({ forzarCopia: true });
+      const msCopia1 = Date.now() - t1;
+      const t2 = Date.now();
+      const c2 = await getAllClients({ forzarCopia: true });
+      const msCopia2 = Date.now() - t2;
+      const A = norm(real);
+      const compara = (l: any[]) => {
+        const B = norm(l);
+        let distintos = 0;
+        const ids: string[] = [];
+        A.forEach((v, k) => {
+          if (B.get(k) !== v) { distintos++; if (ids.length < 5) ids.push(k); }
+        });
+        const soloCopia = [...B.keys()].filter((k) => !A.has(k)).length;
+        return { total: l.length, distintos, soloCopia, ejemplos: ids };
+      };
+      return json({
+        activada: await getCacheHabilitado(),
+        clientesReales: real.length,
+        msLecturaFichaPorFicha: msReal,
+        primeraConCopia: { ms: msCopia1, ...compara(c1) },
+        segundaConCopia: { ms: msCopia2, ...compara(c2) },
+      });
+    }
+    if (path === "/api/cache-mode" && method === "POST") {
+      if (url.searchParams.get("token")) return json({ error: "forbidden" }, 403);
+      const body = await req.json().catch(() => ({}));
+      if (body.token) return json({ error: "forbidden" }, 403);
+      await setCacheHabilitado(!!body.on);
+      return json({ ok: true, activada: await getCacheHabilitado() });
     }
 
     if (path === "/api/backups") {

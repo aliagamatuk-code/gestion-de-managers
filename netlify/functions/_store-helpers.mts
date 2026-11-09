@@ -300,30 +300,145 @@ await s.delete("client:" + c.id);
 return toDelete.length;
 }
 
-export async function getAllClients(): Promise<any[]> {
-await ensureMigrated();
-const s = store();
-const { blobs } = await s.list({ prefix: "client:" });
-// Antes se pedian TODOS los clientes a la vez (mas de 1,000 lecturas
-// simultaneas). Eso satura las conexiones de la funcion y se sospecha que
-// causa fallos intermitentes ("fetch failed") al mandar SMS justo despues.
-// Ahora se lee por tandas de CONCURRENCIA_LECTURA a la vez, en el mismo
-// orden y con el mismo resultado que antes. Si una lectura falla, falla
-// todo igual que antes (no se devuelven datos a medias).
+// ---------------------------------------------------------------------
+// LECTURA DE TODOS LOS CLIENTES (con copia rapida opcional)
+//
+// Cada cliente vive en su propia llave "client:<id>" (esas fichas son la
+// VERDAD y nunca se tocan por esto). Leer las ~1,200 una por una tarda de 3
+// a 9 segundos. La copia rapida ("clients-cache") guarda una copia de cada
+// ficha junto con su "etag" (la huella que Netlify cambia cada vez que la
+// ficha se escribe de nuevo). En cada lectura se pide la lista de llaves
+// (con sus huellas, es 1 sola llamada) y:
+//   - si la huella de una ficha es igual a la guardada -> se usa la copia;
+//   - si cambio, es nueva o no estaba -> se lee de verdad (solo esa);
+//   - si la ficha ya no existe -> no aparece.
+// Asi el resultado SIEMPRE es identico a leer todas las fichas, sin riesgo
+// de mostrar datos viejos, y no hay carreras entre guardados (la copia no
+// es la fuente de verdad: se valida contra la huella en cada lectura).
+// Interruptor: la copia solo se usa si "clients-cache-enabled" vale "1"
+// (se cambia con POST /api/cache-mode). Si algo falla con la copia, se lee
+// todo por el camino de siempre.
+// ---------------------------------------------------------------------
+const CACHE_KEY = "clients-cache";
+const CACHE_FLAG_KEY = "clients-cache-enabled";
 const CONCURRENCIA_LECTURA = 40;
-const resultados: any[] = new Array(blobs.length);
-let siguiente = 0;
-const trabajador = async () => {
-while (true) {
-const i = siguiente++;
-if (i >= blobs.length) return;
-resultados[i] = await s.get(blobs[i].key, { type: "json" });
+let flagMemo: { v: boolean; t: number } | null = null;
+
+async function cacheHabilitado(s: any): Promise<boolean> {
+  const ahora = Date.now();
+  if (flagMemo && ahora - flagMemo.t < 5000) return flagMemo.v;
+  let v = false;
+  try {
+    v = (await s.get(CACHE_FLAG_KEY)) === "1";
+  } catch (e) {
+    v = false;
+  }
+  flagMemo = { v, t: ahora };
+  return v;
 }
-};
-await Promise.all(
-Array.from({ length: Math.min(CONCURRENCIA_LECTURA, blobs.length) }, trabajador)
-);
-return resultados.filter(Boolean);
+
+export async function setCacheHabilitado(on: boolean) {
+  const s = store();
+  await s.set(CACHE_FLAG_KEY, on ? "1" : "0");
+  flagMemo = null;
+}
+
+export async function getCacheHabilitado(): Promise<boolean> {
+  flagMemo = null;
+  return await cacheHabilitado(store());
+}
+
+// Lee las fichas pedidas por tandas de CONCURRENCIA_LECTURA a la vez.
+async function leerFichas(s: any, keys: string[]): Promise<any[]> {
+  const resultados: any[] = new Array(keys.length);
+  let siguiente = 0;
+  const trabajador = async () => {
+    while (true) {
+      const i = siguiente++;
+      if (i >= keys.length) return;
+      resultados[i] = await s.get(keys[i], { type: "json" });
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(CONCURRENCIA_LECTURA, keys.length) }, trabajador)
+  );
+  return resultados;
+}
+
+async function leerTodosSinCopia(s: any, blobs: any[]): Promise<any[]> {
+  // Si una lectura falla, falla todo (no se devuelven datos a medias).
+  const r = await leerFichas(s, blobs.map((b: any) => b.key));
+  return r.filter(Boolean);
+}
+
+async function leerConCopia(s: any, blobs: any[]): Promise<any[]> {
+  const t0 = Date.now();
+  const copia: any = await s.get(CACHE_KEY, { type: "json" });
+  const tCopia = Date.now() - t0;
+  const entradas: Record<string, any> =
+    copia && copia.v === 1 && copia.entries && typeof copia.entries === "object"
+      ? copia.entries
+      : {};
+
+  const resultados: any[] = new Array(blobs.length);
+  const faltan: number[] = [];
+  blobs.forEach((b: any, i: number) => {
+    const e = entradas[b.key];
+    if (e && e.etag === b.etag && e.data) resultados[i] = e.data;
+    else faltan.push(i);
+  });
+
+  const t1 = Date.now();
+  const leidas = await leerFichas(s, faltan.map((i) => blobs[i].key));
+  const tFichas = Date.now() - t1;
+  faltan.forEach((i, j) => {
+    resultados[i] = leidas[j];
+  });
+
+  // Se reescribe la copia solo si hubo cambios (fichas nuevas/cambiadas o
+  // fichas borradas). Si falla el guardado de la copia, no importa: los
+  // datos ya estan leidos bien.
+  const keysVivas = new Set(blobs.map((b: any) => b.key));
+  const sobran = Object.keys(entradas).some((k) => !keysVivas.has(k));
+  if (faltan.length > 0 || sobran) {
+    try {
+      const nuevas: Record<string, any> = {};
+      blobs.forEach((b: any, i: number) => {
+        if (resultados[i]) nuevas[b.key] = { etag: b.etag, data: resultados[i] };
+      });
+      await s.setJSON(CACHE_KEY, { v: 1, entries: nuevas });
+    } catch (e: any) {
+      console.warn("CACHE: no se pudo guardar la copia:", e?.message);
+    }
+  }
+  console.log(
+    `CACHE: copia leida ${tCopia}ms, ${faltan.length} fichas cambiadas/nuevas leidas ${tFichas}ms, ${blobs.length} en total`
+  );
+  return resultados.filter(Boolean);
+}
+
+export async function getAllClients(opts?: { forzarCopia?: boolean; sinCopia?: boolean }): Promise<any[]> {
+  await ensureMigrated();
+  const s = store();
+  const t0 = Date.now();
+  const { blobs } = await s.list({ prefix: "client:" });
+  const tLista = Date.now() - t0;
+  const usarCopia = opts?.sinCopia ? false : opts?.forzarCopia ? true : await cacheHabilitado(s);
+  let resultado: any[];
+  if (usarCopia) {
+    try {
+      resultado = await leerConCopia(s, blobs);
+    } catch (e: any) {
+      console.warn("CACHE: fallo la lectura con copia, se lee todo de nuevo:", e?.message);
+      resultado = await leerTodosSinCopia(s, blobs);
+    }
+  } else {
+    resultado = await leerTodosSinCopia(s, blobs);
+  }
+  console.log(
+    `LECTURA clientes: lista ${tLista}ms, total ${Date.now() - t0}ms, ${resultado.length} clientes, copia ${usarCopia ? "SI" : "no"}`
+  );
+  return resultado;
 }
 
 export async function getClient(id: string): Promise<any> {
