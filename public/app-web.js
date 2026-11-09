@@ -447,6 +447,7 @@ function render(){
       app.appendChild(renderManagerHorarioLista(calendarManagerView));
     } else {
       app.appendChild(renderAdminToolbar());
+      app.appendChild(renderCitasMananaPorCiudad());
       app.appendChild(renderSummary());
       STATE.managers.forEach(m => app.appendChild(renderManagerCard(m.name, true, m.token)));
     }
@@ -455,13 +456,16 @@ function render(){
       app.appendChild(renderMiHorario());
     } else {
       app.appendChild(renderManagerToolbar());
+      app.appendChild(renderCitasMananaPorCiudad());
       app.appendChild(renderCitasHoy(STATE.clients));
       app.appendChild(renderManagerCard(CURRENT_USER.name, false, null));
     }
   } else if(subgestorListOpen){
     app.appendChild(renderSubgestorToolbar());
+    app.appendChild(renderCitasMananaPorCiudad());
     app.appendChild(renderSubgestorClientList());
   } else {
+    app.appendChild(renderCitasMananaPorCiudad());
     app.appendChild(renderSubgestorHorario());
   }
   root.appendChild(app);
@@ -1144,6 +1148,168 @@ function renderCitasHoy(clients){
     rows += `<div class="citahoyrow${c.subgestorId?"":" sinasignar"}"><b>${esc(hora)}</b> — ${esc(c.nombre)} <span class="cmeta">(${asignado})</span>${alerta}${choqueAlerta}</div>`;
   });
   box.innerHTML = `<h3>📅 Citas de hoy (${citas.length})</h3>${rows}`;
+  return box;
+}
+
+
+/* ===================== CITAS DE MAÑANA POR CIUDAD ===================== */
+// Panel que se ve en primer plano para TODOS (manager, sub-gestor y admin):
+// las citas del dia siguiente separadas por ciudad, cada ciudad con su color.
+// El manager y el admin pueden derivar desde aqui (mismo modal de siempre,
+// con el mismo aviso de choque de horario). Arriba van las citas SIN derivar;
+// mas abajo, las que ya estan derivadas.
+const ESTADOS_USA = [
+  "Alabama","Alaska","Arizona","Arkansas","California","Colorado","Connecticut","Delaware","Florida","Georgia",
+  "Hawaii","Idaho","Illinois","Indiana","Iowa","Kansas","Kentucky","Louisiana","Maine","Maryland","Massachusetts",
+  "Michigan","Minnesota","Mississippi","Missouri","Montana","Nebraska","Nevada","New Hampshire","New Jersey",
+  "New Mexico","New York","North Carolina","North Dakota","Ohio","Oklahoma","Oregon","Pennsylvania","Rhode Island",
+  "South Carolina","South Dakota","Tennessee","Texas","Utah","Vermont","Virginia","Washington","West Virginia",
+  "Wisconsin","Wyoming","District of Columbia"
+];
+const ABREV_USA = ["AL","AK","AZ","AR","CA","CO","CT","DE","FL","GA","HI","ID","IL","IN","IA","KS","KY","LA","ME","MD","MA","MI","MN","MS","MO","MT","NE","NV","NH","NJ","NM","NY","NC","ND","OH","OK","OR","PA","RI","SC","SD","TN","TX","UT","VT","VA","WA","WV","WI","WY","DC"];
+
+// Saca "Ciudad, Estado" del texto libre de la direccion. Formatos que entiende:
+//   "calle, Ciudad Estado 12345"   |   "calle, Ciudad, ST 12345"   |   "calle, Ciudad, Estado"
+// Si no puede estar seguro (sin coma, o sin nada despues de la calle), devuelve
+// null y la cita queda en el grupo "Sin ciudad detectada": nunca se inventa.
+function ciudadDeDireccion(direccion){
+  if(!direccion) return null;
+  const partes = direccion.toString().split(",").map(x => x.trim()).filter(Boolean);
+  if(partes.length < 2) return null;
+  const quitarZip = t => t.replace(/\s*\b\d{5}(-\d{4})?\s*$/, "").trim();
+  const quitarPais = t => t.replace(/[\s,]*\b(USA|US|United States)\b\s*$/i, "").trim();
+  let ciudad = "", estado = "";
+  if(partes.length >= 3){
+    // "calle, Ciudad, ST 12345": la ciudad es el 2do segmento, el estado esta en el 3ro
+    ciudad = partes[1];
+    const resto = quitarZip(quitarPais(partes.slice(2).join(" "))).trim();
+    const iab = ABREV_USA.indexOf(resto.toUpperCase());
+    if(iab >= 0) estado = ABREV_USA[iab];
+    else {
+      const ie = ESTADOS_USA.findIndex(e => e.toLowerCase() === resto.toLowerCase());
+      estado = ie >= 0 ? ESTADOS_USA[ie] : resto;
+    }
+  } else {
+    // "calle, Ciudad Estado 12345"
+    let t = quitarZip(quitarPais(partes[1]));
+    const low = t.toLowerCase();
+    const ordenados = ESTADOS_USA.slice().sort((a,b) => b.length - a.length);
+    const hit = ordenados.find(e => low === e.toLowerCase() || low.endsWith(" " + e.toLowerCase()));
+    if(hit){
+      estado = hit;
+      ciudad = t.slice(0, t.length - hit.length).trim();
+    } else {
+      const m = t.match(/^(.*\S)\s+([A-Za-z]{2})$/);
+      if(m && ABREV_USA.indexOf(m[2].toUpperCase()) >= 0){ ciudad = m[1]; estado = m[2].toUpperCase(); }
+      else { ciudad = t; estado = ""; }
+    }
+  }
+  ciudad = ciudad.replace(/[\s,]+$/, "").trim();
+  // "PA" y "Pennsylvania" deben contar como el mismo estado (misma ciudad, mismo color).
+  if(estado.length === 2 && ABREV_USA.indexOf(estado.toUpperCase()) >= 0){
+    estado = ESTADOS_USA[ABREV_USA.indexOf(estado.toUpperCase())];
+  }
+  if(!ciudad || /\d/.test(ciudad)) return null; // si "ciudad" trae numeros, es la calle: no es confiable
+  return estado ? ciudad + ", " + estado : ciudad;
+}
+
+const CIUDAD_PALETA = [
+  "#2E6FC4","#1E8A5A","#C4472B","#7B4FC9","#D98B1F","#0E8FA3",
+  "#B5398A","#6B8E23","#8D6346","#D14B6A","#4A5FD0","#3D8B8B"
+];
+// Color estable por ciudad: la misma ciudad SIEMPRE sale con el mismo color.
+function colorDeCiudad(nombre){
+  const k = (nombre || "").toLowerCase();
+  let h = 0;
+  for(let i = 0; i < k.length; i++) h = (h * 31 + k.charCodeAt(i)) >>> 0;
+  return CIUDAD_PALETA[h % CIUDAD_PALETA.length];
+}
+
+function esCitaDelDia(c, ds){
+  const dt = parseFechaCita(c.fechaCita);
+  if(!dt) return false;
+  const x = dt.getFullYear()+"-"+String(dt.getMonth()+1).padStart(2,"0")+"-"+String(dt.getDate()).padStart(2,"0");
+  return x === ds;
+}
+
+function renderCitasMananaPorCiudad(){
+  const mananaStr = addDaysStr(todayStr(), 1);
+  const citas = STATE.clients
+    .filter(c => esCitaDelDia(c, mananaStr) && c.estado !== "Reprogramado")
+    .sort((a,b) => parseFechaCita(a.fechaCita) - parseFechaCita(b.fechaCita));
+  const puedeDerivar = CURRENT_USER.type === "manager" || CURRENT_USER.type === "admin";
+  const esAdmin = CURRENT_USER.type === "admin";
+
+  const box = document.createElement("div");
+  box.className = "summarybox";
+  if(citas.length === 0){
+    box.innerHTML = `<h3>🗓️ Citas de mañana</h3><div class="emptynote">Sin citas agendadas para mañana.</div>`;
+    return box;
+  }
+
+  const dtM = parseFechaCita(citas[0].fechaCita);
+  const diaTxt = dtM ? dtM.toLocaleDateString("es", {weekday:"long", day:"numeric", month:"long"}) : "";
+  const sinDerivar = citas.filter(c => !c.subgestorId);
+  const derivadas = citas.filter(c => c.subgestorId);
+
+  const head = document.createElement("h3");
+  head.textContent = `🗓️ Citas de mañana (${citas.length}) — ${diaTxt}`;
+  box.appendChild(head);
+
+  function agrupar(lista){
+    const grupos = {};
+    lista.forEach(c => {
+      const ciudad = ciudadDeDireccion(c.direccion);
+      const key = ciudad ? ciudad.toLowerCase() : "__sin__";
+      if(!grupos[key]) grupos[key] = { ciudad: ciudad || "Sin ciudad detectada", items: [], sin: !ciudad };
+      grupos[key].items.push(c);
+    });
+    // Ciudades con mas citas primero; "Sin ciudad detectada" siempre al final.
+    return Object.values(grupos).sort((a,b) =>
+      (a.sin - b.sin) || (b.items.length - a.items.length) || a.ciudad.localeCompare(b.ciudad));
+  }
+
+  function pintarSeccion(titulo, lista, conBoton){
+    if(lista.length === 0) return;
+    const t = document.createElement("div");
+    t.className = "listsubtitle";
+    t.textContent = `${titulo} (${lista.length})`;
+    box.appendChild(t);
+    agrupar(lista).forEach(g => {
+      const color = g.sin ? "#8A8F98" : colorDeCiudad(g.ciudad);
+      const bloque = document.createElement("div");
+      bloque.style.cssText = `border-left:5px solid ${color};border-radius:6px;margin:8px 0;padding:2px 0 2px 10px;`;
+      const gh = document.createElement("div");
+      gh.style.cssText = `font-weight:700;font-size:13px;color:${color};margin:4px 0;`;
+      gh.textContent = `📍 ${g.ciudad} (${g.items.length})`;
+      bloque.appendChild(gh);
+      g.items.forEach(c => {
+        const dt = parseFechaCita(c.fechaCita);
+        const hora = dt ? dt.toLocaleTimeString("es", {hour:"2-digit", minute:"2-digit"}) : "";
+        const row = document.createElement("div");
+        row.className = "citahoyrow";
+        row.style.cssText = "display:flex;gap:8px;align-items:center;justify-content:space-between;flex-wrap:wrap;";
+        const quien = esAdmin ? ` · ${esc(c.manager)}` : "";
+        const asignado = c.subgestorId ? ` · Sub-gestor: ${esc(c.subgestorNombre||"")}` : "";
+        const choque = c.choqueHorario ? ' <span class="choqueflag">⚠️ Cruce de horario</span>' : "";
+        const info = document.createElement("div");
+        info.innerHTML = `<b>${esc(hora)}</b> — ${esc(c.nombre)}<div class="cmeta">${esc(c.direccion || "")}${quien}${asignado}${choque}</div>`;
+        row.appendChild(info);
+        if(conBoton && puedeDerivar){
+          const b = document.createElement("button");
+          b.className = "miniBtn";
+          b.textContent = "↪️ Derivar";
+          b.onclick = () => openDerivarModal(c);
+          row.appendChild(b);
+        }
+        bloque.appendChild(row);
+      });
+      box.appendChild(bloque);
+    });
+  }
+
+  pintarSeccion("🟠 Por derivar", sinDerivar, true);
+  pintarSeccion("✅ Ya derivadas", derivadas, false);
   return box;
 }
 
