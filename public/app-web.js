@@ -1595,7 +1595,12 @@ function renderCalendarStrip(title, managerNames){
   nextBtn.className = "toolbtn";
   nextBtn.textContent = "Ver siguientes ▶";
   nextBtn.onclick = () => { calendarStart = addDaysStr(calendarStart, 3); render(); };
+  const prevBtn = document.createElement("button");
+  prevBtn.className = "toolbtn";
+  prevBtn.textContent = "◀ Ver anteriores";
+  prevBtn.onclick = () => { calendarStart = addDaysStr(calendarStart, -3); render(); };
   toolbar.appendChild(backBtn);
+  toolbar.appendChild(prevBtn);
   toolbar.appendChild(nextBtn);
   wrap.appendChild(toolbar);
 
