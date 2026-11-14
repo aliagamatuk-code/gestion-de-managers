@@ -1742,9 +1742,7 @@ function renderHorarioLista(managerName, title, onBack, extraButtons){
   // No se puede retroceder antes de hoy: si el primer dia visible ya es
   // hoy (o, por alguna razon, uno anterior), el boton queda deshabilitado
   // en vez de mandar al calendario a fechas pasadas.
-  const atStart = calendarStart <= todayStr();
-  prevBtn.disabled = atStart;
-  prevBtn.onclick = atStart ? null : () => { calendarStart = addDaysStr(calendarStart, -3); render(); };
+  prevBtn.onclick = () => { calendarStart = addDaysStr(calendarStart, -3); render(); };
   const nextBtn = document.createElement("button");
   nextBtn.className = "toolbtn";
   nextBtn.textContent = "Ver siguientes ▶";
